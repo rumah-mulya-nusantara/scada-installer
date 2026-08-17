@@ -1,0 +1,29 @@
+{
+	admin off
+	persist_config off
+}
+
+{$SITE_ADDRESS} {
+	{$CADDY_TLS}
+
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# Browser hanya mengenal satu origin: yang ini. Cookie refresh httpOnly
+	# karenanya tetap first-party tanpa perlu CORS.
+	@api path /api/* /health /health/* /docs /openapi.json
+	reverse_proxy @api api:8000
+
+	reverse_proxy web:3000
+
+	log {
+		output stdout
+		format console
+	}
+}

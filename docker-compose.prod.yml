@@ -1,0 +1,146 @@
+name: scada-ruanglab
+
+# Stack produksi / on-premise. Image diambil dari ghcr.io — tidak perlu
+# source code di server. Hanya file ini, .env, dan ./license/ yang dibutuhkan.
+#
+# Pemakaian:  ./install.sh   (pertama kali)
+#             make prod-up   (selanjutnya)
+#
+# Image tersedia di:
+#   ghcr.io/rumah-mulya-nusantara/scada-api
+#   ghcr.io/rumah-mulya-nusantara/scada-web
+#   ghcr.io/rumah-mulya-nusantara/scada-agent
+
+services:
+  db:
+    image: timescale/timescaledb:2.17.2-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-scada}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD wajib diisi}
+      POSTGRES_DB: ${POSTGRES_DB:-scada}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scada} -d ${POSTGRES_DB:-scada}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    networks: [backend]
+
+  api:
+    image: ghcr.io/rumah-mulya-nusantara/scada-api:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scada}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-scada}
+      REDIS_URL: redis://redis:6379/0
+      LICENSE_FILE: /srv/license/license.key
+    volumes:
+      - ./license:/srv/license:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    networks: [backend, frontend]
+
+  # Historian, alarm, retensi, watchdog agen. Image sama dengan api.
+  worker:
+    image: ghcr.io/rumah-mulya-nusantara/scada-api:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-scada}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-scada}
+      REDIS_URL: redis://redis:6379/0
+      LICENSE_FILE: /srv/license/license.key
+    volumes:
+      - ./license:/srv/license:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["python", "-m", "app.workers"]
+    networks: [backend]
+
+  web:
+    image: ghcr.io/rumah-mulya-nusantara/scada-web:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      API_ORIGIN: http://api:8000
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-}
+    depends_on:
+      - api
+    networks: [frontend]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?SITE_ADDRESS wajib diisi}
+      CADDY_TLS: ${CADDY_TLS:-tls internal}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+      - api
+    networks: [frontend]
+
+  # ─── Edge agent ────────────────────────────────────────────────────────────
+  #
+  # Ikut naik bersama `make prod-up`. Pertama kali jalankan:
+  #   1. Buka UI → Agen → Buat agen baru → salin enrollment code
+  #   2. Isi AGENT_ENROLLMENT_CODE di .env
+  #   3. make prod-restart
+  # Setelah enrolment, kunci tersimpan di volume agent_state — kode tidak
+  # diperlukan lagi dan bisa dikosongkan.
+  agent:
+    image: ghcr.io/rumah-mulya-nusantara/scada-agent:${IMAGE_TAG:-latest}
+    restart: on-failure
+    env_file: .env
+    environment:
+      AGENT_API_URL: http://api:8000
+      AGENT_ENROLLMENT_CODE: ${AGENT_ENROLLMENT_CODE:-}
+      AGENT_STATE_DIR: /var/lib/scada-agent
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+    volumes:
+      - agent_state:/var/lib/scada-agent
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [backend]
+
+# db dan redis hanya ada di jaringan `backend`; Caddy tidak bisa menyentuhnya.
+networks:
+  backend:
+  frontend:
+
+volumes:
+  db_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
+  agent_state:
