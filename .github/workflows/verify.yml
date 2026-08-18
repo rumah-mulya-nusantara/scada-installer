@@ -1,0 +1,42 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Berkas tertanam masih sinkron
+        run: tools/embed.py check
+
+      - name: Sintaks install.sh
+        run: bash -n install.sh && bash -n get.sh
+
+      - name: Sintaks install.ps1
+        shell: pwsh
+        run: |
+          foreach ($f in @('install.ps1', 'get.ps1')) {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $f), [ref]$null, [ref]$errs) | Out-Null
+            if ($errs) { $errs | ForEach-Object { "${f}: $($_.Message)" }; exit 1 }
+            "$f OK"
+          }
+
+      - name: shellcheck
+        run: shellcheck --severity=warning install.sh get.sh
+
+      - name: docker compose config valid
+        run: |
+          printf 'POSTGRES_PASSWORD=x\nSITE_ADDRESS=:80\n' > .env
+          docker compose -f docker-compose.prod.yml config > /dev/null
+
+      - name: Caddyfile valid
+        run: |
+          docker run --rm -e SITE_ADDRESS=':80' -e CADDY_TLS='' \
+            -v "$PWD/infra/caddy/Caddyfile:/f:ro" caddy:2-alpine \
+            caddy validate --adapter caddyfile --config /f

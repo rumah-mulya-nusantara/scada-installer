@@ -3,8 +3,8 @@ name: scada-ruanglab
 # Stack produksi / on-premise. Image diambil dari ghcr.io — tidak perlu
 # source code di server. Hanya file ini, .env, dan ./license/ yang dibutuhkan.
 #
-# Pemakaian:  ./install.sh   (pertama kali)
-#             make prod-up   (selanjutnya)
+# Pemakaian:  install.sh / install.ps1   (pertama kali)
+#             scada start                (selanjutnya)
 #
 # Image tersedia di:
 #   ghcr.io/rumah-mulya-nusantara/scada-api
@@ -99,7 +99,7 @@ services:
       - "${HTTPS_PORT:-443}:443"
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:?SITE_ADDRESS wajib diisi}
-      CADDY_TLS: ${CADDY_TLS:-tls internal}
+      CADDY_TLS: ${CADDY_TLS:-}
     volumes:
       - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -111,10 +111,9 @@ services:
 
   # ─── Edge agent ────────────────────────────────────────────────────────────
   #
-  # Ikut naik bersama `make prod-up`. Pertama kali jalankan:
+  # Ikut naik bersama `scada start`. Pertama kali jalankan:
   #   1. Buka UI → Agen → Buat agen baru → salin enrollment code
-  #   2. Isi AGENT_ENROLLMENT_CODE di .env
-  #   3. make prod-restart
+  #   2. Jalankan: scada enroll enr_xxxx
   # Setelah enrolment, kunci tersimpan di volume agent_state — kode tidak
   # diperlukan lagi dan bisa dikosongkan.
   agent:

@@ -1,0 +1,102 @@
+# SCADA — Installer
+
+Pemasang **SCADA HMI Builder & Universal Gateway** untuk server on-premise.
+Satu perintah, satu berkas, tanpa perlu source code di mesin tujuan.
+
+## Pasang
+
+**Linux · macOS · WSL · Git Bash**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rumah-mulya-nusantara/scada-installer/main/install.sh | bash
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/rumah-mulya-nusantara/scada-installer/main/install.ps1 | iex
+```
+
+Installer akan, dalam satu jalan:
+
+1. memasang Docker bila belum ada (`get.docker.com`, Homebrew, atau winget) dan menunggunya siap;
+2. memilih direktori instalasi — `/opt/scada` di Linux, `~/scada` di macOS/Windows, karena Docker
+   Desktop hanya membagikan `$HOME` secara bawaan;
+3. mendeteksi alamat IP server dan port HTTP yang bebas (mundur ke 8080 bila 80 terpakai);
+4. menanyakan email dan kata sandi admin;
+5. membangkitkan `.env` berisi rahasia acak, lalu menulis `docker-compose.prod.yml` dan `Caddyfile`;
+6. menarik image dari ghcr.io, menjalankan migrasi, mengisi data awal, membuat akun admin;
+7. memasang perintah `scada` supaya operator tidak perlu menghafal `docker compose`.
+
+Menjalankan ulang perintah yang sama di mesin yang sudah terpasang adalah **upgrade**: `.env` dan
+akun admin dipertahankan, image ditarik ulang, migrasi dijalankan lagi.
+
+## Tanpa interaksi
+
+```bash
+curl -fsSL .../install.sh | bash -s -- --yes \
+  --admin-email admin@pabrik.co.id --admin-password 'Rahasia123'
+```
+
+```powershell
+$env:SCADA_ADMIN_EMAIL = 'admin@pabrik.co.id'
+$env:SCADA_ADMIN_PASSWORD = 'Rahasia123'
+$env:SCADA_YES = '1'
+irm .../install.ps1 | iex
+```
+
+`iex` tidak bisa menerima parameter, jadi di Windows semua opsi lewat environment:
+`SCADA_DIR`, `SCADA_HOST`, `SCADA_PORT`, `SCADA_ORG`, `SCADA_ADMIN_NAME`, `SCADA_ADMIN_EMAIL`,
+`SCADA_ADMIN_PASSWORD`, `SCADA_TAG`, `SCADA_YES`. Di Linux/macOS opsi yang sama tersedia sebagai
+flag (`install.sh --help`) maupun environment.
+
+## Mengelola
+
+```
+scada start | stop | restart | status
+scada logs [layanan]     ikuti log (api, web, worker, agent, db)
+scada open | url         buka antarmuka
+scada update             tarik image terbaru + migrasi
+scada enroll enr_xxxx    daftarkan edge agent
+scada backup             cadangkan database + .env
+scada restore <berkas>   pulihkan dari cadangan
+scada uninstall          hapus kontainer dan volume
+```
+
+`scada backup` menyalin `.env` bersama dump-nya. Tanpa `.env` itu kredensial device di database
+tidak bisa dibuka lagi — simpan keduanya.
+
+## Edge agent
+
+Agent ikut naik bersama stack tapi diam sampai didaftarkan:
+
+1. buka UI → **Agen** → **Buat Agen Baru** → salin kode `enr_xxxx`
+2. `scada enroll enr_xxxx`
+
+Setelah enrolment, kuncinya tersimpan di volume `agent_state`; kodenya tidak diperlukan lagi.
+
+## Isi repo
+
+| Berkas | Peran |
+|---|---|
+| `install.sh` / `install.ps1` | pemasang berdiri sendiri — satu-satunya yang perlu diunduh |
+| `docker-compose.prod.yml` | definisi stack, **sumber kanonik** |
+| `infra/caddy/Caddyfile` | konfigurasi reverse proxy, **sumber kanonik** |
+| `tools/embed.py` | menanam ulang dua berkas kanonik itu ke dalam kedua installer |
+| `get.sh` / `get.ps1` | alias lama, meneruskan ke `install.sh` / `install.ps1` |
+
+Kedua installer memuat salinan `docker-compose.prod.yml` dan `Caddyfile` di dalamnya supaya
+pemasangan cukup satu unduhan. Setelah menyunting berkas kanonik, jalankan:
+
+```bash
+tools/embed.py sync     # tanam ulang
+tools/embed.py check    # dipakai CI; gagal bila menyimpang
+```
+
+## Prasyarat
+
+Hanya Docker — dan itu pun dipasang otomatis. Gunakan `--no-docker-install` (atau
+`-NoDockerInstall`) bila mesin tujuan mengaturnya sendiri.
+
+Instalasi on-premise tidak melakukan panggilan keluar apa pun setelah image tertarik; alamat
+`raw.githubusercontent.com` dan `ghcr.io` hanya dibutuhkan saat memasang dan saat `scada update`.
