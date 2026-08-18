@@ -170,6 +170,27 @@ function Invoke-Compose {
     if ($LASTEXITCODE -ne 0) { throw "docker compose $($args -join ' ') gagal (kode $LASTEXITCODE)" }
 }
 
+# Probe yang BOLEH gagal harus lewat sini. Dengan $ErrorActionPreference =
+# 'Stop', Windows PowerShell 5.1 mengubah stderr perintah native menjadi galat
+# terminating, dan `2>$null` tidak menahannya (PowerShell#4002) — satu baris
+# `docker ... 2>$null` yang gagal mematikan seluruh pemasang. Perintah dijalankan
+# di dalam fungsi ini supaya $ErrorActionPreference lokal benar-benar berlaku
+# untuknya; scriptblock dari pemanggil tidak akan ikut.
+function Invoke-DockerQuiet {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$DockerArgs)
+    $prevEap = $ErrorActionPreference
+    $prevNative = $null
+    if (Test-Path 'variable:PSNativeCommandUseErrorActionPreference') {
+        $prevNative = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+    $ErrorActionPreference = 'Continue'
+    try { & docker @DockerArgs 2>$null } catch { } finally {
+        $ErrorActionPreference = $prevEap
+        if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
+    }
+}
+
 # ── Isi berkas instalasi ─────────────────────────────────────────────────────
 $ComposeYaml = @'
 name: scada-ruanglab
@@ -434,6 +455,25 @@ $StatePath = Join-Path $PSScriptRoot '.update-state'
 $LogPath  = Join-Path $PSScriptRoot 'update.log'
 
 function Compose { & docker compose -f 'docker-compose.prod.yml' @args }
+
+# Lihat catatan di install.ps1: dengan $ErrorActionPreference = 'Stop',
+# `docker ... 2>$null` yang gagal mematikan skrip ini. `scada doctor` justru
+# dipakai saat stack rusak, jadi setiap probe di sini harus lewat fungsi ini.
+function Invoke-DockerQuiet {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$DockerArgs)
+    $prevEap = $ErrorActionPreference
+    $prevNative = $null
+    if (Test-Path 'variable:PSNativeCommandUseErrorActionPreference') {
+        $prevNative = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+    $ErrorActionPreference = 'Continue'
+    try { & docker @DockerArgs 2>$null } catch { } finally {
+        $ErrorActionPreference = $prevEap
+        if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
+    }
+}
+function Compose-Quiet { Invoke-DockerQuiet compose -f 'docker-compose.prod.yml' @args }
 function Save-Text ([string]$Path, [string]$Text) {
     $lf = $Text -replace "`r`n", "`n"
     if (-not $lf.EndsWith("`n")) { $lf += "`n" }
@@ -457,9 +497,9 @@ function Get-Url { Get-EnvValue 'PUBLIC_URL' }
 # berhasil dipasang, bukan dengan keadaan sebelum pull, supaya pembaruan yang
 # gagal di tengah jalan dicoba lagi pada jadwal berikutnya.
 function Get-ImageState {
-    $images = @(Compose config --images 2>$null | Sort-Object -Unique)
+    $images = @(Compose-Quiet config --images | Where-Object { $_ } | Sort-Object -Unique)
     $lines = foreach ($img in $images) {
-        $id = & docker image inspect --format '{{.Id}}' $img 2>$null
+        $id = Invoke-DockerQuiet image inspect --format '{{.Id}}' $img
         if (-not $id) { $id = 'belum' }
         "$img $id"
     }
@@ -609,7 +649,7 @@ switch ($Command) {
     '_autoupdate' { Invoke-AutoUpdateRun }
     'doctor'  {
         Write-Host "Pemeriksaan SCADA — $PSScriptRoot`n" -ForegroundColor Cyan
-        Write-Host 'Kontainer'; Compose ps; Write-Host ''
+        Write-Host 'Kontainer'; Compose-Quiet ps; Write-Host ''
         $port = Get-EnvValue 'HTTP_PORT'; if (-not $port) { $port = '80' }
         Write-Host 'Antarmuka'
         try {
@@ -620,8 +660,8 @@ switch ($Command) {
         }
         Write-Host "`nAkun"
         $u = Get-EnvValue 'POSTGRES_USER'; $d = Get-EnvValue 'POSTGRES_DB'
-        $orgs = (& docker compose -f 'docker-compose.prod.yml' exec -T db psql -U $u -d $d -tAc 'select count(*) from organizations' 2>$null | Out-String).Trim()
-        $users = (& docker compose -f 'docker-compose.prod.yml' exec -T db psql -U $u -d $d -tAc 'select count(*) from users' 2>$null | Out-String).Trim()
+        $orgs = (Compose-Quiet exec -T db psql -U $u -d $d -tAc 'select count(*) from organizations' | Out-String).Trim()
+        $users = (Compose-Quiet exec -T db psql -U $u -d $d -tAc 'select count(*) from users' | Out-String).Trim()
         if (-not $orgs) {
             Write-Host '✘ Database belum bisa dibaca — migrasi mungkin belum jalan: scada logs db' -ForegroundColor Red
         } elseif ($orgs -eq '0' -or $users -eq '0') {
@@ -629,11 +669,11 @@ switch ($Command) {
             Write-Host "    Buat sekarang:  scada create-admin email@anda.co.id 'KataSandiMin8'"
         } else {
             Write-Host "✔ $orgs organisasi, $users pengguna" -ForegroundColor Green
-            & docker compose -f 'docker-compose.prod.yml' exec -T db psql -U $u -d $d -tAc 'select email, role, status from users order by created_at limit 5' 2>$null |
+            Compose-Quiet exec -T db psql -U $u -d $d -tAc 'select email, role, status from users order by created_at limit 5' |
                 ForEach-Object { Write-Host "    $_" }
         }
         Write-Host "`nGalat terakhir di api"
-        Compose logs --tail=30 api 2>&1 | Select-String -Pattern 'error|traceback|exception|critical' |
+        Compose-Quiet logs --tail=30 api | Select-String -Pattern 'error|traceback|exception|critical' |
             Select-Object -Last 8 | ForEach-Object { Write-Host "    $_" }
         Write-Host ''
     }
@@ -789,12 +829,23 @@ if (Test-Path $EnvPath) {
     }
 }
 
+# `docker compose ps` menginterpolasi .env dan menolak jalan kalau variabel
+# wajib seperti SITE_ADDRESS belum ada. Pada pemasangan baru .env memang belum
+# ditulis di titik ini, jadi probe hanya boleh jalan kalau kedua berkasnya ada.
+function Test-ApiContainerExists {
+    if (-not (Test-Path (Join-Path $Dir 'docker-compose.prod.yml'))) { return $false }
+    if (-not (Test-Path (Join-Path $Dir '.env')))                    { return $false }
+    $ids = @(Invoke-DockerQuiet compose -f 'docker-compose.prod.yml' ps -aq api |
+             Where-Object { $_ -and $_.Trim() })
+    return ($ids.Count -gt 0)
+}
+
 # Adanya .env tidak membuktikan instalasi selesai: instalasi yang mati di tengah
 # jalan meninggalkan .env tanpa akun admin. Yang membuktikannya adalah penanda
 # ini, atau kontainer api dari instalasi sebelum penanda itu ada.
 if (Test-Path $MarkerPath) {
     $Fresh = $false
-} elseif (@(& docker compose -f 'docker-compose.prod.yml' ps -aq api 2>$null).Count -gt 0) {
+} elseif (Test-ApiContainerExists) {
     New-Item -ItemType File -Path $MarkerPath -Force | Out-Null
     $Fresh = $false
 } else {
