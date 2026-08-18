@@ -435,7 +435,7 @@ write_env() {
     secret="$(rand_hex 32)"
     enc="$(rand_urlsafe_b64 32)"
     pgpw="$(rand_hex 24)"
-    ws_url="$(printf '%s' "$SITE_ADDRESS" | sed 's|^http|ws|')"
+    ws_url="$(printf '%s' "$PUBLIC_URL" | sed 's|^http|ws|')"
     if [ "$SCHEME" = "https" ]; then
         cookie_secure="true"; caddy_tls="tls internal"
     else
