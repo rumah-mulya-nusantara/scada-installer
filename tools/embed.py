@@ -19,8 +19,12 @@ BLOCKS = [
      "cat > docker-compose.prod.yml <<'YAML'\n", "YAML\n"),
     ("infra/caddy/Caddyfile", "install.sh",
      "cat > infra/caddy/Caddyfile <<'CADDY'\n", "CADDY\n"),
+    ("tools/reset_password.py", "install.sh",
+     "cat > reset_password.py <<'PYFILE'\n", "PYFILE\n"),
     ("docker-compose.prod.yml", "install.ps1",
      "$ComposeYaml = @'\n", "'@\n"),
+    ("tools/reset_password.py", "install.ps1",
+     "$ResetPasswordPy = @'\n", "'@\n"),
     ("infra/caddy/Caddyfile", "install.ps1",
      "$Caddyfile = @'\n", "'@\n"),
 ]

@@ -61,11 +61,35 @@ scada update              pasang versi terbaru sekarang
 scada update --check      lihat apakah ada versi baru
 scada autoupdate on|off   pembaruan otomatis harian
 scada autoupdate          status dan jadwalnya
+scada doctor              periksa kenapa tidak bisa dipakai
+scada create-admin <email> <sandi>    buat admin pertama
+scada reset-password <email> <sandi>  ganti kata sandi
 scada enroll enr_xxxx     daftarkan edge agent
 scada backup              cadangkan database + .env
 scada restore <berkas>    pulihkan dari cadangan
 scada uninstall           hapus kontainer dan volume
 ```
+
+## Tidak bisa login
+
+```bash
+scada doctor
+```
+
+Menampilkan status kontainer, apakah `/health` menjawab, jumlah organisasi dan pengguna, daftar
+email admin beserta statusnya, lalu galat terakhir di log api. Kalau tabel penggunanya masih kosong
+ia akan mengatakannya langsung — itu penyebab paling sering login ditolak setelah instalasi yang
+sempat gagal di tengah jalan.
+
+```bash
+scada create-admin admin@pabrik.co.id 'KataSandiMin8'    # belum ada admin sama sekali
+scada reset-password admin@pabrik.co.id 'SandiBaru123'   # lupa kata sandi
+```
+
+`reset-password` memakai fungsi hash yang sama dengan alur login (argon2), mengaktifkan kembali akun
+yang berstatus `invited` atau `suspended` — keduanya ditolak saat login — dan **mencabut seluruh
+sesi lama**, sehingga perangkat yang masih memegang refresh token ikut terputus. Kata sandi dikirim
+lewat environment, bukan argumen, jadi tidak muncul di daftar proses.
 
 ## Pembaruan otomatis
 
@@ -122,11 +146,12 @@ Setelah enrolment, kuncinya tersimpan di volume `agent_state`; kodenya tidak dip
 | `install.sh` / `install.ps1` | pemasang berdiri sendiri — satu-satunya yang perlu diunduh |
 | `docker-compose.prod.yml` | definisi stack, **sumber kanonik** |
 | `infra/caddy/Caddyfile` | konfigurasi reverse proxy, **sumber kanonik** |
-| `tools/embed.py` | menanam ulang dua berkas kanonik itu ke dalam kedua installer |
+| `tools/reset_password.py` | dipakai `scada reset-password`, **sumber kanonik** |
+| `tools/embed.py` | menanam ulang ketiga berkas kanonik itu ke dalam kedua installer |
 | `get.sh` / `get.ps1` | alias lama, meneruskan ke `install.sh` / `install.ps1` |
 
-Kedua installer memuat salinan `docker-compose.prod.yml` dan `Caddyfile` di dalamnya supaya
-pemasangan cukup satu unduhan. Setelah menyunting berkas kanonik, jalankan:
+Kedua installer memuat salinan `docker-compose.prod.yml`, `Caddyfile`, dan `reset_password.py`
+di dalamnya supaya pemasangan cukup satu unduhan. Setelah menyunting berkas kanonik, jalankan:
 
 ```bash
 tools/embed.py sync     # tanam ulang
