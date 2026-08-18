@@ -111,40 +111,38 @@ if (Test-Path $ENV_FILE) {
     
     $COOKIE_SECURE = if ($Scheme -eq "https") { "true" } else { "false" }
     $CADDY_TLS = if ($Scheme -eq "https") { "tls internal" } else { "" }
-    $DateStr = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-
-    $EnvContent = @"
-# Dibuat oleh install.ps1 — $DateStr
-DEPLOYMENT_MODE=$Mode
-ENVIRONMENT=production
-LOG_LEVEL=INFO
-
-SITE_ADDRESS=$SITE_ADDRESS
-PUBLIC_URL=$SITE_ADDRESS
-CORS_ORIGINS=$SITE_ADDRESS
-NEXT_PUBLIC_WS_URL=$WS_URL
-HTTP_PORT=80
-HTTPS_PORT=443
-CADDY_TLS=$CADDY_TLS
-
-POSTGRES_USER=scada
-POSTGRES_PASSWORD=$POSTGRES_PASSWORD
-POSTGRES_DB=scada
-
-SECRET_KEY=$SECRET_KEY
-ENCRYPTION_KEY=$ENCRYPTION_KEY
-ACCESS_TOKEN_EXPIRE_MINUTES=15
-REFRESH_TOKEN_EXPIRE_DAYS=30
-COOKIE_SECURE=$COOKIE_SECURE
-COOKIE_DOMAIN=
-
-# Edge agent — isi setelah buat agen di UI, lalu jalankan: .\scada.ps1 restart
-AGENT_ENROLLMENT_CODE=
-AGENT_LOG_LEVEL=INFO
-
-LICENSE_FILE=/srv/license/license.key
-IMAGE_TAG=$ImageTag
-"@
+    $EnvContent = @(
+        "# Dibuat oleh install.ps1 — $DateStr",
+        "DEPLOYMENT_MODE=$Mode",
+        "ENVIRONMENT=production",
+        "LOG_LEVEL=INFO",
+        "",
+        "SITE_ADDRESS=$SITE_ADDRESS",
+        "PUBLIC_URL=$SITE_ADDRESS",
+        "CORS_ORIGINS=$SITE_ADDRESS",
+        "NEXT_PUBLIC_WS_URL=$WS_URL",
+        "HTTP_PORT=80",
+        "HTTPS_PORT=443",
+        "CADDY_TLS=$CADDY_TLS",
+        "",
+        "POSTGRES_USER=scada",
+        "POSTGRES_PASSWORD=$POSTGRES_PASSWORD",
+        "POSTGRES_DB=scada",
+        "",
+        "SECRET_KEY=$SECRET_KEY",
+        "ENCRYPTION_KEY=$ENCRYPTION_KEY",
+        "ACCESS_TOKEN_EXPIRE_MINUTES=15",
+        "REFRESH_TOKEN_EXPIRE_DAYS=30",
+        "COOKIE_SECURE=$COOKIE_SECURE",
+        "COOKIE_DOMAIN=",
+        "",
+        "# Edge agent — isi setelah buat agen di UI, lalu jalankan: .\scada.ps1 restart",
+        "AGENT_ENROLLMENT_CODE=",
+        "AGENT_LOG_LEVEL=INFO",
+        "",
+        "LICENSE_FILE=/srv/license/license.key",
+        "IMAGE_TAG=$ImageTag"
+    ) -join "`n"
     Set-Content -Path $ENV_FILE -Value $EnvContent -Encoding UTF8
     Write-Ok ".env dibuat"
 }
