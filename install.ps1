@@ -537,6 +537,47 @@ switch ($Command) {
         }
     }
     '_autoupdate' { Invoke-AutoUpdateRun }
+    'doctor'  {
+        Write-Host "Pemeriksaan SCADA — $PSScriptRoot`n" -ForegroundColor Cyan
+        Write-Host 'Kontainer'; Compose ps; Write-Host ''
+        $port = Get-EnvValue 'HTTP_PORT'; if (-not $port) { $port = '80' }
+        Write-Host 'Antarmuka'
+        try {
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -UseBasicParsing -TimeoutSec 3
+            Write-Host "✔ http://127.0.0.1:$port/health menjawab ($($r.StatusCode))" -ForegroundColor Green
+        } catch {
+            Write-Host "✘ http://127.0.0.1:$port/health tidak menjawab" -ForegroundColor Red
+        }
+        Write-Host "`nAkun"
+        $u = Get-EnvValue 'POSTGRES_USER'; $d = Get-EnvValue 'POSTGRES_DB'
+        $orgs = (& docker compose -f 'docker-compose.prod.yml' exec -T db psql -U $u -d $d -tAc 'select count(*) from organizations' 2>$null | Out-String).Trim()
+        $users = (& docker compose -f 'docker-compose.prod.yml' exec -T db psql -U $u -d $d -tAc 'select count(*) from users' 2>$null | Out-String).Trim()
+        if (-not $orgs) {
+            Write-Host '✘ Database belum bisa dibaca — migrasi mungkin belum jalan: scada logs db' -ForegroundColor Red
+        } elseif ($orgs -eq '0' -or $users -eq '0') {
+            Write-Host '✘ Belum ada organisasi/admin — itu sebabnya login ditolak.' -ForegroundColor Red
+            Write-Host "    Buat sekarang:  scada create-admin email@anda.co.id 'KataSandiMin8'"
+        } else {
+            Write-Host "✔ $orgs organisasi, $users pengguna" -ForegroundColor Green
+            & docker compose -f 'docker-compose.prod.yml' exec -T db psql -U $u -d $d -tAc 'select email, role, is_active from users order by created_at limit 5' 2>$null |
+                ForEach-Object { Write-Host "    $_" }
+        }
+        Write-Host "`nGalat terakhir di api"
+        Compose logs --tail=30 api 2>&1 | Select-String -Pattern 'error|traceback|exception|critical' |
+            Select-Object -Last 8 | ForEach-Object { Write-Host "    $_" }
+        Write-Host ''
+    }
+    'create-admin' {
+        $email = $Rest | Select-Object -First 1
+        $pass  = $Rest | Select-Object -Skip 1 -First 1
+        if (-not $email -or -not $pass) {
+            Write-Host "✘ Pemakaian: scada create-admin email@anda.co.id 'KataSandiMin8'" -ForegroundColor Red; exit 1
+        }
+        Compose run --rm -T -e "BOOTSTRAP_ADMIN_EMAIL=$email" -e "BOOTSTRAP_ADMIN_PASSWORD=$pass" `
+            api python -m app.db.bootstrap
+        New-Item -ItemType File -Path (Join-Path $PSScriptRoot '.bootstrap-done') -Force | Out-Null
+        Write-Host "✔ Selesai. Coba login sebagai $email" -ForegroundColor Green
+    }
     'enroll'  {
         $code = $Rest | Select-Object -First 1
         if (-not $code) { Write-Host '✘ Sertakan kode: scada enroll enr_xxxx' -ForegroundColor Red; exit 1 }
@@ -570,6 +611,8 @@ switch ($Command) {
         Write-Host '  scada update --check      lihat apakah ada versi baru'
         Write-Host '  scada autoupdate on|off   pembaruan otomatis harian'
         Write-Host '  scada autoupdate          status dan jadwalnya'
+        Write-Host '  scada doctor              periksa kenapa tidak bisa dipakai'
+        Write-Host '  scada create-admin <email> <sandi>   buat admin pertama'
         Write-Host '  scada enroll enr_xxxx     daftarkan edge agent'
         Write-Host '  scada backup              cadangkan database + .env'
         Write-Host '  scada restore <berkas>    pulihkan dari cadangan'
@@ -641,9 +684,10 @@ Write-Ok "Alamat server: $PublicUrl"
 
 Write-Step '3/7  Akun admin'
 $EnvPath = Join-Path $Dir '.env'
+$MarkerPath = Join-Path $Dir '.bootstrap-done'
 $Fresh = $false
 if (Test-Path $EnvPath) {
-    Write-Ok 'Instalasi lama terdeteksi — .env dipertahankan, admin tidak dibuat ulang'
+    Write-Ok 'Konfigurasi lama terdeteksi — .env dipertahankan'
     $envText = [System.IO.File]::ReadAllText($EnvPath) -replace "`r`n", "`n"
     if ($envText -notmatch '(?m)^AUTO_UPDATE=') {
         $keep = $AutoUpdate
@@ -660,21 +704,37 @@ if (Test-Path $EnvPath) {
         $AutoUpdate = (($envText -split "`n" | Where-Object { $_ -match '^AUTO_UPDATE=' } |
                         Select-Object -First 1) -replace '^AUTO_UPDATE=', '')
     }
+}
+
+# Adanya .env tidak membuktikan instalasi selesai: instalasi yang mati di tengah
+# jalan meninggalkan .env tanpa akun admin. Yang membuktikannya adalah penanda
+# ini, atau kontainer api dari instalasi sebelum penanda itu ada.
+if (Test-Path $MarkerPath) {
+    $Fresh = $false
+} elseif (@(& docker compose -f 'docker-compose.prod.yml' ps -aq api 2>$null).Count -gt 0) {
+    New-Item -ItemType File -Path $MarkerPath -Force | Out-Null
+    $Fresh = $false
 } else {
     $Fresh = $true
-    if ($Yes) {
-        if (-not $AdminEmail) { Die 'SCADA_ADMIN_EMAIL wajib diisi pada mode non-interaktif' }
-        if ($AdminPassword.Length -lt 8) { Die 'SCADA_ADMIN_PASSWORD minimal 8 karakter' }
-    } else {
-        while (-not $AdminEmail) { $AdminEmail = Read-Host 'Email admin' }
-        while ($AdminPassword.Length -lt 8) {
-            $secure = Read-Host 'Kata sandi admin (min. 8 karakter)' -AsSecureString
-            $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-            $AdminPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-            if ($AdminPassword.Length -lt 8) { Write-Warn2 'Terlalu pendek, coba lagi.' }
-        }
+}
+
+if (-not $Fresh) {
+    Write-Ok 'Akun admin sudah ada — tidak dibuat ulang'
+} elseif ($Yes) {
+    if (-not $AdminEmail) { Die 'SCADA_ADMIN_EMAIL wajib diisi pada mode non-interaktif' }
+    if ($AdminPassword.Length -lt 8) { Die 'SCADA_ADMIN_PASSWORD minimal 8 karakter' }
+} else {
+    while (-not $AdminEmail) { $AdminEmail = Read-Host 'Email admin' }
+    while ($AdminPassword.Length -lt 8) {
+        $secure = Read-Host 'Kata sandi admin (min. 8 karakter)' -AsSecureString
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        $AdminPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        if ($AdminPassword.Length -lt 8) { Write-Warn2 'Terlalu pendek, coba lagi.' }
     }
+}
+
+if (-not (Test-Path $EnvPath)) {
 
     if (-not $AutoUpdate) {
         if ($Yes) { $AutoUpdate = 'on' }
@@ -744,22 +804,30 @@ if ($Fresh) {
         -e "BOOTSTRAP_ADMIN_EMAIL=$AdminEmail" `
         -e "BOOTSTRAP_ADMIN_PASSWORD=$AdminPassword" `
         api python -m app.db.bootstrap
+    New-Item -ItemType File -Path $MarkerPath -Force | Out-Null
     Write-Ok "Akun admin dibuat: $AdminEmail"
 }
 
 Write-Step '6/7  Menyalakan layanan'
 Invoke-Compose up -d
 Write-Host '· Menunggu antarmuka siap' -ForegroundColor Cyan -NoNewline
+$Healthy = $false
 for ($i = 0; $i -lt 60; $i++) {
     try {
         $r = Invoke-WebRequest -Uri "http://127.0.0.1:$HttpPort/health" -UseBasicParsing -TimeoutSec 2
-        if ($r.StatusCode -eq 200) { break }
+        if ($r.StatusCode -eq 200) { $Healthy = $true; break }
     } catch { }
     Start-Sleep -Seconds 2
     Write-Host '.' -NoNewline
 }
 Write-Host ''
-Write-Ok 'Semua layanan berjalan'
+if ($Healthy) {
+    Write-Ok 'Semua layanan berjalan'
+} else {
+    Write-Err2 'Layanan belum menjawab setelah 2 menit.'
+    Invoke-Compose ps
+    Write-Err2 'Lihat sebabnya: scada logs api'
+}
 
 Write-Step '7/7  Perintah scada'
 Save-Text (Join-Path $Dir 'scada.ps1') $ScadaCli
@@ -786,7 +854,11 @@ if ($userPath -notlike "*$Dir*") {
 }
 
 Write-Host ''
-Write-Host '  ✔  SCADA siap dipakai' -ForegroundColor Green
+if ($Healthy) {
+    Write-Host '  ✔  SCADA siap dipakai' -ForegroundColor Green
+} else {
+    Write-Host '  !  SCADA terpasang tetapi belum menjawab — jalankan: scada doctor' -ForegroundColor Yellow
+}
 Write-Host ''
 Write-Host "     Buka       $PublicUrl"
 if ($AdminEmail) { Write-Host "     Login      $AdminEmail" }

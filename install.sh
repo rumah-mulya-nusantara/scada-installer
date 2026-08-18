@@ -715,6 +715,47 @@ case "${1:-help}" in
             *)   status_autoupdate ;;
         esac ;;
     _autoupdate) run_autoupdate ;;
+    doctor)
+        printf '%sPemeriksaan SCADA%s — %s\n\n' "$CYN" "$RST" "$SCADA_DIR"
+        printf 'Kontainer\n'; dc ps; printf '\n'
+        port="$(env_value HTTP_PORT)"; : "${port:=80}"
+        printf 'Antarmuka\n'
+        if command -v curl > /dev/null 2>&1 && curl -fsS --max-time 3 "http://127.0.0.1:${port}/health" > /dev/null 2>&1; then
+            ok "http://127.0.0.1:${port}/health menjawab"
+        else
+            err "http://127.0.0.1:${port}/health tidak menjawab"
+        fi
+        printf '\nAkun\n'
+        orgs="$(dc exec -T db psql -U "$(env_value POSTGRES_USER)" -d "$(env_value POSTGRES_DB)" \
+                  -tAc 'select count(*) from organizations' 2>/dev/null | tr -d ' \r' || true)"
+        users="$(dc exec -T db psql -U "$(env_value POSTGRES_USER)" -d "$(env_value POSTGRES_DB)" \
+                  -tAc 'select count(*) from users' 2>/dev/null | tr -d ' \r' || true)"
+        if [ -z "$orgs" ]; then
+            err "Database belum bisa dibaca — migrasi mungkin belum jalan: scada logs db"
+        elif [ "$orgs" = "0" ] || [ "$users" = "0" ]; then
+            err "Belum ada organisasi/admin — itu sebabnya login ditolak."
+            printf '    Buat sekarang:\n'
+            printf "      scada create-admin email@anda.co.id 'KataSandiMin8'\n"
+        else
+            ok "$orgs organisasi, $users pengguna"
+            dc exec -T db psql -U "$(env_value POSTGRES_USER)" -d "$(env_value POSTGRES_DB)" \
+                -tAc 'select email, role, is_active from users order by created_at limit 5' 2>/dev/null | sed 's/^/    /'
+        fi
+        printf '\nGalat terakhir di api\n'
+        dc logs --tail=30 api 2>&1 | grep -iE 'error|traceback|exception|critical' | tail -8 | sed 's/^/    /' || true
+        printf '\n' ;;
+    create-admin)
+        email="${2:-}"; pass="${3:-}"
+        if [ -z "$email" ] || [ -z "$pass" ]; then
+            err "Pemakaian: scada create-admin email@anda.co.id 'KataSandiMin8'"; exit 1
+        fi
+        dc run --rm -T \
+            -e "BOOTSTRAP_ORG_NAME=$(env_value BOOTSTRAP_ORG_NAME)" \
+            -e "BOOTSTRAP_ADMIN_EMAIL=$email" \
+            -e "BOOTSTRAP_ADMIN_PASSWORD=$pass" \
+            api python -m app.db.bootstrap
+        : > .bootstrap-done
+        ok "Selesai. Coba login sebagai $email" ;;
     enroll)
         code="${2:-}"
         [ -n "$code" ] || { err "Sertakan kode: scada enroll enr_xxxx"; exit 1; }
@@ -745,6 +786,8 @@ case "${1:-help}" in
         printf '  scada update --check      lihat apakah ada versi baru\n'
         printf '  scada autoupdate on|off   pembaruan otomatis harian\n'
         printf '  scada autoupdate          status dan jadwalnya\n'
+        printf '  scada doctor              periksa kenapa tidak bisa dipakai\n'
+        printf '  scada create-admin <email> <sandi>   buat admin pertama\n'
         printf '  scada enroll enr_xxxx     daftarkan edge agent\n'
         printf '  scada backup              cadangkan database + .env\n'
         printf '  scada restore <berkas>    pulihkan dari cadangan\n'
@@ -823,6 +866,7 @@ SITE_ADDRESS=""
 PUBLIC_URL=""
 FRESH=0
 REUSED_ENV=0
+HEALTHY=2
 
 main() {
     while [ $# -gt 0 ]; do
@@ -918,7 +962,7 @@ main() {
 
     step "3/7  Akun admin"
     if [ -f .env ]; then
-        ok "Instalasi lama terdeteksi — .env dipertahankan, admin tidak dibuat ulang"
+        ok "Konfigurasi lama terdeteksi — .env dipertahankan"
         if ! grep -q '^AUTO_UPDATE=' .env; then
             printf '\n# Pembaruan otomatis harian. Matikan di instalasi air-gapped: scada autoupdate off\nAUTO_UPDATE=%s\nAUTO_UPDATE_AT=%s\n' \
                 "${AUTO_UPDATE:-on}" "$AUTO_UPDATE_AT" >> .env
@@ -926,18 +970,34 @@ main() {
             sed -i.bak "s|^AUTO_UPDATE=.*|AUTO_UPDATE=$AUTO_UPDATE|" .env && rm -f .env.bak
         fi
         AUTO_UPDATE="$(env_value AUTO_UPDATE)"
+    fi
+
+    # Adanya .env tidak membuktikan instalasi selesai: instalasi yang mati di
+    # tengah jalan meninggalkan .env tanpa akun admin. Yang membuktikannya
+    # adalah penanda ini, atau kontainer api dari instalasi sebelum penanda ada.
+    if [ -f .bootstrap-done ]; then
+        FRESH=0
+    elif [ -n "$(dc ps -aq api 2>/dev/null)" ]; then
+        : > .bootstrap-done
+        FRESH=0
     else
         FRESH=1
-        if [ "$ASSUME_YES" -eq 1 ]; then
-            [ -n "$ADMIN_EMAIL" ] || die "--admin-email wajib diisi bersama --yes"
-            [ "${#ADMIN_PASSWORD}" -ge 8 ] || die "--admin-password minimal 8 karakter"
-        else
-            while [ -z "$ADMIN_EMAIL" ]; do ADMIN_EMAIL="$(ask 'Email admin:')"; done
-            while [ "${#ADMIN_PASSWORD}" -lt 8 ]; do
-                ADMIN_PASSWORD="$(ask_secret 'Kata sandi admin (min. 8 karakter):')"
-                if [ "${#ADMIN_PASSWORD}" -lt 8 ]; then warn "Terlalu pendek, coba lagi."; fi
-            done
-        fi
+    fi
+
+    if [ "$FRESH" -eq 0 ]; then
+        ok "Akun admin sudah ada — tidak dibuat ulang"
+    elif [ "$ASSUME_YES" -eq 1 ]; then
+        [ -n "$ADMIN_EMAIL" ] || die "--admin-email wajib diisi bersama --yes"
+        [ "${#ADMIN_PASSWORD}" -ge 8 ] || die "--admin-password minimal 8 karakter"
+    else
+        while [ -z "$ADMIN_EMAIL" ]; do ADMIN_EMAIL="$(ask 'Email admin:')"; done
+        while [ "${#ADMIN_PASSWORD}" -lt 8 ]; do
+            ADMIN_PASSWORD="$(ask_secret 'Kata sandi admin (min. 8 karakter):')"
+            if [ "${#ADMIN_PASSWORD}" -lt 8 ]; then warn "Terlalu pendek, coba lagi."; fi
+        done
+    fi
+
+    if [ ! -f .env ]; then
         if [ -z "$AUTO_UPDATE" ]; then
             if [ "$ASSUME_YES" -eq 1 ]; then
                 AUTO_UPDATE="on"
@@ -971,23 +1031,32 @@ main() {
             -e "BOOTSTRAP_ADMIN_EMAIL=$ADMIN_EMAIL" \
             -e "BOOTSTRAP_ADMIN_PASSWORD=$ADMIN_PASSWORD" \
             api python -m app.db.bootstrap
+        : > .bootstrap-done
         ok "Akun admin dibuat: $ADMIN_EMAIL"
     fi
 
     step "6/7  Menyalakan layanan"
     dc up -d
     printf '%s· Menunggu antarmuka siap%s' "$CYN" "$RST"
+    HEALTHY=2
     if have curl; then
+        HEALTHY=0
         i=0
         while [ "$i" -lt 60 ]; do
             if curl -fsS --max-time 2 "http://127.0.0.1:${HTTP_PORT}/health" > /dev/null 2>&1; then
-                break
+                HEALTHY=1; break
             fi
             sleep 2; i=$((i + 1)); printf '.'
         done
     fi
     printf '\n'
-    ok "Semua layanan berjalan"
+    case "$HEALTHY" in
+        1) ok "Semua layanan berjalan" ;;
+        2) warn "curl tidak tersedia — status layanan tidak diperiksa" ;;
+        *) err "Layanan belum menjawab setelah 2 menit."
+           dc ps
+           err "Lihat sebabnya: $DIR/scada logs api" ;;
+    esac
 
     step "7/7  Perintah scada"
     write_cli
@@ -1003,7 +1072,11 @@ main() {
         ok "Pembaruan otomatis mati — pasang manual dengan: scada update"
     fi
 
-    printf '\n%s%s%s\n' "$GRN" "  ✔  SCADA siap dipakai" "$RST"
+    if [ "$HEALTHY" -eq 0 ]; then
+        printf '\n%s%s%s\n' "$YLW" "  !  SCADA terpasang tetapi belum menjawab — jalankan: scada doctor" "$RST"
+    else
+        printf '\n%s%s%s\n' "$GRN" "  ✔  SCADA siap dipakai" "$RST"
+    fi
     printf '\n'
     printf '     Buka       %s%s%s\n' "$BLD" "$PUBLIC_URL" "$RST"
     if [ -n "$ADMIN_EMAIL" ]; then printf '     Login      %s\n' "$ADMIN_EMAIL"; fi
