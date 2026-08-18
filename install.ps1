@@ -22,6 +22,8 @@ param(
     [string]$AdminEmail    = $env:SCADA_ADMIN_EMAIL,
     [string]$AdminPassword = $env:SCADA_ADMIN_PASSWORD,
     [string]$ImageTag      = $env:SCADA_TAG,
+    [string]$AutoUpdate    = $env:SCADA_AUTO_UPDATE,
+    [string]$UpdateAt      = $env:SCADA_UPDATE_AT,
     [switch]$Https,
     [switch]$NoDockerInstall,
     [switch]$Yes,
@@ -35,6 +37,7 @@ if (-not $Dir)       { $Dir       = Join-Path $env:USERPROFILE 'scada' }
 if (-not $OrgName)   { $OrgName   = 'SCADA' }
 if (-not $AdminName) { $AdminName = 'Administrator' }
 if (-not $ImageTag)  { $ImageTag  = 'latest' }
+if (-not $UpdateAt)  { $UpdateAt  = '02:30' }
 if ($Port -eq 0 -and $env:SCADA_PORT) { $Port = [int]$env:SCADA_PORT }
 if ($env:SCADA_YES -eq '1') { $Yes = $true }
 
@@ -355,9 +358,162 @@ param([Parameter(Position = 0)][string]$Command = 'help',
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
+$TaskName = 'SCADA Auto Update'
+$EnvPath  = Join-Path $PSScriptRoot '.env'
+$StatePath = Join-Path $PSScriptRoot '.update-state'
+$LogPath  = Join-Path $PSScriptRoot 'update.log'
+
 function Compose { & docker compose -f 'docker-compose.prod.yml' @args }
-function Get-Url {
-    (Get-Content .env | Where-Object { $_ -match '^PUBLIC_URL=' } | Select-Object -First 1) -replace '^PUBLIC_URL=', ''
+function Save-Text ([string]$Path, [string]$Text) {
+    $lf = $Text -replace "`r`n", "`n"
+    if (-not $lf.EndsWith("`n")) { $lf += "`n" }
+    [System.IO.File]::WriteAllText($Path, $lf, (New-Object System.Text.UTF8Encoding($false)))
+}
+function Get-EnvValue ([string]$Key) {
+    if (-not (Test-Path $EnvPath)) { return '' }
+    $line = Get-Content $EnvPath | Where-Object { $_ -match "^$Key=" } | Select-Object -First 1
+    if ($line) { return ($line -replace "^$Key=", '') }
+    return ''
+}
+function Set-EnvValue ([string]$Key, [string]$Value) {
+    $text = [System.IO.File]::ReadAllText($EnvPath) -replace "`r`n", "`n"
+    if ($text -match "(?m)^$Key=.*$") { $text = $text -replace "(?m)^$Key=.*$", "$Key=$Value" }
+    else { $text = $text.TrimEnd("`n") + "`n$Key=$Value`n" }
+    Save-Text $EnvPath $text
+}
+function Get-Url { Get-EnvValue 'PUBLIC_URL' }
+
+# Sidik jari image yang dipakai stack saat ini. Dibandingkan dengan yang terakhir
+# berhasil dipasang, bukan dengan keadaan sebelum pull, supaya pembaruan yang
+# gagal di tengah jalan dicoba lagi pada jadwal berikutnya.
+function Get-ImageState {
+    $images = @(Compose config --images 2>$null | Sort-Object -Unique)
+    $lines = foreach ($img in $images) {
+        $id = & docker image inspect --format '{{.Id}}' $img 2>$null
+        if (-not $id) { $id = 'belum' }
+        "$img $id"
+    }
+    return ($lines -join "`n")
+}
+function Get-AppliedState {
+    if (Test-Path $StatePath) { return ([System.IO.File]::ReadAllText($StatePath) -replace "`r`n", "`n").TrimEnd("`n") }
+    return ''
+}
+function Wait-Healthy {
+    $port = Get-EnvValue 'HTTP_PORT'
+    if (-not $port) { $port = '80' }
+    for ($i = 0; $i -lt 45; $i++) {
+        try {
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -UseBasicParsing -TimeoutSec 2
+            if ($r.StatusCode -eq 200) { return $true }
+        } catch { }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+function Backup-Database {
+    New-Item -ItemType Directory -Force -Path 'backups' | Out-Null
+    $f = "backups\scada-$(Get-Date -Format 'yyyyMMddTHHmmssZ').dump"
+    & docker compose -f 'docker-compose.prod.yml' exec -T db pg_dump -U scada -Fc scada > $f
+    Copy-Item $EnvPath "$f.env" -Force
+    return $f
+}
+function Invoke-Update {
+    $dump = ''
+    Write-Host '· Menarik image terbaru...' -ForegroundColor Cyan
+    Compose pull
+    if (Compose ps -q db) {
+        Write-Host '· Mencadangkan database dulu...' -ForegroundColor Cyan
+        $dump = Backup-Database
+        Write-Host "✔ Cadangan: $dump" -ForegroundColor Green
+    }
+    Compose up -d --wait db redis
+    Write-Host '· Migrasi database...' -ForegroundColor Cyan
+    Compose run --rm -T api alembic upgrade head
+    Write-Host '· Menyalakan ulang layanan...' -ForegroundColor Cyan
+    Compose up -d
+    Save-Text $StatePath (Get-ImageState)
+    if (Wait-Healthy) {
+        Write-Host "✔ Pembaruan selesai — $(Get-Url)" -ForegroundColor Green
+    } else {
+        Write-Host '✘ Layanan belum sehat setelah pembaruan. Periksa: scada logs api' -ForegroundColor Red
+        if ($dump) { Write-Host "  Pulihkan bila perlu: scada restore $dump" -ForegroundColor Red }
+        exit 1
+    }
+}
+function Get-UpdateTime {
+    $t = Get-EnvValue 'AUTO_UPDATE_AT'
+    if (-not $t) { $t = '02:30' }
+    return $t
+}
+function Enable-AutoUpdate {
+    if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
+        Write-Host '✘ Penjadwal tugas Windows tidak tersedia.' -ForegroundColor Red
+        exit 1
+    }
+    $at = Get-UpdateTime
+    Set-EnvValue 'AUTO_UPDATE' 'on'
+    Set-EnvValue 'AUTO_UPDATE_AT' $at
+    Save-Text $StatePath (Get-ImageState)
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}\scada.ps1" _autoupdate' -f $PSScriptRoot)
+    $trigger  = New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact($at, 'HH:mm', $null))
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RandomDelay (New-TimeSpan -Minutes 30)
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+        -Settings $settings -Description 'Pembaruan otomatis SCADA' -Force | Out-Null
+    Write-Host "✔ Pembaruan otomatis aktif (Task Scheduler, sekitar pukul $at)" -ForegroundColor Green
+}
+function Disable-AutoUpdate {
+    Set-EnvValue 'AUTO_UPDATE' 'off'
+    if (Get-Command Unregister-ScheduledTask -ErrorAction SilentlyContinue) {
+        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        }
+    }
+    Write-Host '✔ Pembaruan otomatis dimatikan' -ForegroundColor Green
+}
+function Show-AutoUpdate {
+    $state = Get-EnvValue 'AUTO_UPDATE'
+    if (-not $state) { $state = 'off' }
+    Write-Host "  status   $state"
+    Write-Host "  jadwal   sekitar pukul $(Get-UpdateTime) setiap hari"
+    $task = $null
+    if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    }
+    if ($task) {
+        Write-Host '  mekanis  Task Scheduler'
+        $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($info) { Write-Host "  berikut  $($info.NextRunTime)" }
+    } else {
+        Write-Host '  mekanis  belum terjadwal'
+    }
+    if (Test-Path $LogPath) {
+        Write-Host "`n  catatan terakhir:"
+        Get-Content $LogPath -Tail 8 | ForEach-Object { Write-Host "    $_" }
+    }
+}
+function Invoke-AutoUpdateRun {
+    Start-Transcript -Path $LogPath -Append | Out-Null
+    try {
+        Write-Host "=== $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')) ==="
+        if ((Get-EnvValue 'AUTO_UPDATE') -ne 'on') { Write-Host 'pembaruan otomatis nonaktif — dilewati'; return }
+        Compose pull -q
+        if ($LASTEXITCODE -ne 0) { Write-Host 'registry tidak terjangkau — dicoba lagi pada jadwal berikutnya'; return }
+        if ((Get-ImageState) -eq (Get-AppliedState)) { Write-Host 'sudah versi terbaru'; return }
+        Write-Host 'versi baru ditemukan — memasang'
+        Invoke-Update
+    } finally { Stop-Transcript | Out-Null }
+}
+function Test-UpdateAvailable {
+    Write-Host '· Memeriksa versi terbaru...' -ForegroundColor Cyan
+    Compose pull -q
+    if ($LASTEXITCODE -ne 0) { Write-Host '✘ Registry tidak terjangkau.' -ForegroundColor Red; exit 1 }
+    if ((Get-ImageState) -eq (Get-AppliedState)) {
+        Write-Host '✔ Sudah versi terbaru.' -ForegroundColor Green
+    } else {
+        Write-Host '! Ada versi baru. Pasang dengan: scada update' -ForegroundColor Yellow
+    }
 }
 
 switch ($Command) {
@@ -370,31 +526,26 @@ switch ($Command) {
     'url'     { Get-Url }
     'open'    { Start-Process (Get-Url) }
     'update'  {
-        Compose pull
-        Compose up -d --wait db redis
-        Compose run --rm api alembic upgrade head
-        Compose up -d --force-recreate
-        Write-Host '✔ Diperbarui ke image terbaru' -ForegroundColor Green
+        if ($Rest -and $Rest[0] -eq '--check') { Test-UpdateAvailable } else { Invoke-Update }
     }
+    'autoupdate' {
+        # switch ($null) tidak menjalankan cabang apa pun, default sekalipun.
+        switch ([string]($Rest | Select-Object -First 1)) {
+            'on'    { Enable-AutoUpdate }
+            'off'   { Disable-AutoUpdate }
+            default { Show-AutoUpdate }
+        }
+    }
+    '_autoupdate' { Invoke-AutoUpdateRun }
     'enroll'  {
         $code = $Rest | Select-Object -First 1
         if (-not $code) { Write-Host '✘ Sertakan kode: scada enroll enr_xxxx' -ForegroundColor Red; exit 1 }
-        $envPath = Join-Path $PSScriptRoot '.env'
-        $text = [System.IO.File]::ReadAllText($envPath) -replace "`r`n", "`n"
-        if ($text -match '(?m)^AGENT_ENROLLMENT_CODE=.*$') {
-            $text = $text -replace '(?m)^AGENT_ENROLLMENT_CODE=.*$', "AGENT_ENROLLMENT_CODE=$code"
-        } else {
-            $text += "`nAGENT_ENROLLMENT_CODE=$code`n"
-        }
-        [System.IO.File]::WriteAllText($envPath, $text, (New-Object System.Text.UTF8Encoding($false)))
+        Set-EnvValue 'AGENT_ENROLLMENT_CODE' $code
         Compose up -d --force-recreate agent
         Write-Host '✔ Agent didaftarkan. Pantau: scada logs agent' -ForegroundColor Green
     }
     'backup'  {
-        New-Item -ItemType Directory -Force -Path 'backups' | Out-Null
-        $f = "backups\scada-$(Get-Date -Format 'yyyyMMddTHHmmssZ').dump"
-        & docker compose -f 'docker-compose.prod.yml' exec -T db pg_dump -U scada -Fc scada > $f
-        Copy-Item .env "$f.env"
+        $f = Backup-Database
         Write-Host "✔ Cadangan: $f (.env ikut disalin — wajib untuk membuka kredensial device)" -ForegroundColor Green
     }
     'restore' {
@@ -406,19 +557,23 @@ switch ($Command) {
     'uninstall' {
         $c = Read-Host "Hapus SELURUH data SCADA di $PSScriptRoot? Ketik `"hapus`" untuk lanjut"
         if ($c -ne 'hapus') { Write-Host 'Dibatalkan.'; exit 1 }
+        Disable-AutoUpdate
         Compose down -v
         Write-Host "✔ Kontainer dan volume dihapus. Sisa berkas ada di $PSScriptRoot" -ForegroundColor Green
     }
     default {
         Write-Host "SCADA — $PSScriptRoot`n" -ForegroundColor Cyan
         Write-Host '  scada start | stop | restart | status'
-        Write-Host '  scada logs [layanan]     ikuti log (api, web, worker, agent, db)'
-        Write-Host '  scada open | url         buka antarmuka'
-        Write-Host '  scada update             tarik image terbaru + migrasi'
-        Write-Host '  scada enroll enr_xxxx    daftarkan edge agent'
-        Write-Host '  scada backup             cadangkan database + .env'
-        Write-Host '  scada restore <berkas>   pulihkan dari cadangan'
-        Write-Host '  scada uninstall          hapus kontainer dan volume'
+        Write-Host '  scada logs [layanan]      ikuti log (api, web, worker, agent, db)'
+        Write-Host '  scada open | url          buka antarmuka'
+        Write-Host '  scada update              pasang versi terbaru sekarang'
+        Write-Host '  scada update --check      lihat apakah ada versi baru'
+        Write-Host '  scada autoupdate on|off   pembaruan otomatis harian'
+        Write-Host '  scada autoupdate          status dan jadwalnya'
+        Write-Host '  scada enroll enr_xxxx     daftarkan edge agent'
+        Write-Host '  scada backup              cadangkan database + .env'
+        Write-Host '  scada restore <berkas>    pulihkan dari cadangan'
+        Write-Host '  scada uninstall           hapus kontainer dan volume'
         Write-Host ''
     }
 }
@@ -489,6 +644,22 @@ $EnvPath = Join-Path $Dir '.env'
 $Fresh = $false
 if (Test-Path $EnvPath) {
     Write-Ok 'Instalasi lama terdeteksi — .env dipertahankan, admin tidak dibuat ulang'
+    $envText = [System.IO.File]::ReadAllText($EnvPath) -replace "`r`n", "`n"
+    if ($envText -notmatch '(?m)^AUTO_UPDATE=') {
+        $keep = $AutoUpdate
+        if (-not $keep) { $keep = 'on' }
+        $envText = $envText.TrimEnd("`n") +
+            "`n`n# Pembaruan otomatis harian. Matikan di instalasi air-gapped: scada autoupdate off" +
+            "`nAUTO_UPDATE=$keep`nAUTO_UPDATE_AT=$UpdateAt`n"
+        Save-Text $EnvPath $envText
+        $AutoUpdate = $keep
+    } elseif ($AutoUpdate) {
+        $envText = $envText -replace '(?m)^AUTO_UPDATE=.*$', "AUTO_UPDATE=$AutoUpdate"
+        Save-Text $EnvPath $envText
+    } else {
+        $AutoUpdate = (($envText -split "`n" | Where-Object { $_ -match '^AUTO_UPDATE=' } |
+                        Select-Object -First 1) -replace '^AUTO_UPDATE=', '')
+    }
 } else {
     $Fresh = $true
     if ($Yes) {
@@ -503,6 +674,12 @@ if (Test-Path $EnvPath) {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
             if ($AdminPassword.Length -lt 8) { Write-Warn2 'Terlalu pendek, coba lagi.' }
         }
+    }
+
+    if (-not $AutoUpdate) {
+        if ($Yes) { $AutoUpdate = 'on' }
+        elseif (Confirm-Action "Pasang pembaruan otomatis setiap malam pukul ${UpdateAt}?") { $AutoUpdate = 'on' }
+        else { $AutoUpdate = 'off' }
     }
 
     $wsUrl = $PublicUrl -replace '^http', 'ws'
@@ -538,6 +715,10 @@ AGENT_LOG_LEVEL=INFO
 
 LICENSE_FILE=/srv/license/license.key
 IMAGE_TAG=$ImageTag
+
+# Pembaruan otomatis harian. Matikan di instalasi air-gapped: scada autoupdate off
+AUTO_UPDATE=$AutoUpdate
+AUTO_UPDATE_AT=$UpdateAt
 "@
     Save-Text $EnvPath $envText
     Write-Ok 'Konfigurasi dan rahasia dibuat'
@@ -552,12 +733,12 @@ Write-Ok 'Image siap'
 
 Write-Step '5/7  Database'
 Invoke-Compose up -d --wait db redis
-Invoke-Compose run --rm api alembic upgrade head
-Invoke-Compose run --rm api python -m app.db.seed
+Invoke-Compose run --rm -T api alembic upgrade head
+Invoke-Compose run --rm -T api python -m app.db.seed
 Write-Ok 'Skema dan data awal siap'
 
 if ($Fresh) {
-    Invoke-Compose run --rm `
+    Invoke-Compose run --rm -T `
         -e "BOOTSTRAP_ORG_NAME=$OrgName" `
         -e "BOOTSTRAP_ADMIN_NAME=$AdminName" `
         -e "BOOTSTRAP_ADMIN_EMAIL=$AdminEmail" `
@@ -584,6 +765,17 @@ Write-Step '7/7  Perintah scada'
 Save-Text (Join-Path $Dir 'scada.ps1') $ScadaCli
 [System.IO.File]::WriteAllText((Join-Path $Dir 'scada.cmd'), $ScadaCmd, (New-Object System.Text.UTF8Encoding($false)))
 
+if ($AutoUpdate -eq 'on') {
+    try {
+        & (Join-Path $Dir 'scada.ps1') autoupdate on
+    } catch {
+        $AutoUpdate = 'off'
+        Write-Warn2 'Penjadwalan gagal — jalankan sendiri nanti: scada autoupdate on'
+    }
+} else {
+    Write-Ok 'Pembaruan otomatis mati — pasang manual dengan: scada update'
+}
+
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath -notlike "*$Dir*") {
     [Environment]::SetEnvironmentVariable('Path', "$userPath;$Dir", 'User')
@@ -599,6 +791,9 @@ Write-Host ''
 Write-Host "     Buka       $PublicUrl"
 if ($AdminEmail) { Write-Host "     Login      $AdminEmail" }
 Write-Host "     Kelola     scada  (start, stop, logs, update, backup)"
+if ($AutoUpdate -eq 'on') {
+    Write-Host "     Pembaruan  otomatis tiap malam pukul $UpdateAt  (scada autoupdate off untuk mematikan)"
+}
 Write-Host ''
 Write-Host '     Langkah berikutnya: buat agen di UI → Agen → salin kode → jalankan' -ForegroundColor DarkGray
 Write-Host '     scada enroll enr_xxxx' -ForegroundColor DarkGray

@@ -27,6 +27,16 @@ jobs:
             "$f OK"
           }
 
+      - name: compose run wajib memakai -T
+        run: |
+          # Compose lama meminta TTY secara bawaan; di bawah `curl | bash` stdin
+          # adalah pipa, jadi Docker menolak dengan "input device is not a TTY".
+          if grep -n 'run --rm' install.sh install.ps1 | grep -v -- '-T'; then
+            echo "^ 'compose run' di atas belum memakai -T"
+            exit 1
+          fi
+          echo "semua 'compose run' memakai -T"
+
       - name: shellcheck
         run: shellcheck --severity=warning install.sh get.sh
 

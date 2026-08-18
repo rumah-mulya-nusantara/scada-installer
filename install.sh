@@ -17,6 +17,8 @@
 #   --admin-email <email>   email admin
 #   --admin-password <pw>   kata sandi admin (min. 8 karakter)
 #   --tag <versi>           tag image (default: latest)
+#   --auto-update on|off    pembaruan otomatis harian (default: on)
+#   --update-at HH:MM       jam pembaruan otomatis (default: 02:30)
 #   --https                 aktifkan TLS internal Caddy
 #   --no-docker-install     jangan pasang Docker otomatis
 #   --yes, -y               jangan bertanya apa pun
@@ -474,76 +476,279 @@ AGENT_LOG_LEVEL=INFO
 
 LICENSE_FILE=/srv/license/license.key
 IMAGE_TAG=$IMAGE_TAG
+
+# Pembaruan otomatis harian. Matikan di instalasi air-gapped: scada autoupdate off
+AUTO_UPDATE=$AUTO_UPDATE
+AUTO_UPDATE_AT=$AUTO_UPDATE_AT
 ENV
     umask 022
 }
 
 write_cli() {
-    printf '#!/usr/bin/env bash\nSCADA_DIR="%s"\nSCADA_DOCKER="%s"\n' "$DIR" "$COMPOSE" > scada
+    printf '#!/usr/bin/env bash\nSCADA_DIR="%s"\nSCADA_COMPOSE="%s"\nSCADA_DOCKER="%s"\n' "$DIR" "$COMPOSE" "$DOCKER" > scada
     cat >> scada <<'CLI'
 set -euo pipefail
 cd "$SCADA_DIR"
 
-GRN=$'\033[32m'; RED=$'\033[31m'; CYN=$'\033[36m'; DIM=$'\033[2m'; RST=$'\033[0m'
-dc() { $SCADA_DOCKER -f docker-compose.prod.yml "$@"; }
-url() { grep -E '^PUBLIC_URL=' .env 2>/dev/null | cut -d= -f2- ; }
+GRN=''; RED=''; YLW=''; CYN=''; DIM=''; RST=''
+if [ -t 1 ]; then
+    GRN=$'\033[32m'; RED=$'\033[31m'; YLW=$'\033[33m'
+    CYN=$'\033[36m'; DIM=$'\033[2m'; RST=$'\033[0m'
+fi
+ok()   { printf '%s✔%s %s\n' "$GRN" "$RST" "$*"; }
+info() { printf '%s·%s %s\n' "$CYN" "$RST" "$*"; }
+warn() { printf '%s!%s %s\n' "$YLW" "$RST" "$*"; }
+err()  { printf '%s✘%s %s\n' "$RED" "$RST" "$*" >&2; }
+
+dc() { $SCADA_COMPOSE -f docker-compose.prod.yml "$@"; }
+dk() { $SCADA_DOCKER "$@"; }
+
+env_value() { sed -n "s/^$1=//p" .env 2>/dev/null | head -1; }
+env_set() {
+    if grep -q "^$1=" .env 2>/dev/null; then
+        sed -i.bak "s|^$1=.*|$1=$2|" .env && rm -f .env.bak
+    else
+        printf '%s=%s\n' "$1" "$2" >> .env
+    fi
+}
+url() { env_value PUBLIC_URL; }
+
+# Sidik jari image yang dipakai stack saat ini. Dibandingkan dengan yang
+# terakhir berhasil dipasang, bukan dengan keadaan sebelum pull, supaya
+# pembaruan yang gagal di tengah jalan dicoba lagi pada jadwal berikutnya.
+image_state() {
+    dc config --images 2>/dev/null | sort -u | while IFS= read -r img; do
+        printf '%s %s\n' "$img" "$(dk image inspect --format '{{.Id}}' "$img" 2>/dev/null || echo belum)"
+    done
+}
+
+applied_state() { cat .update-state 2>/dev/null || true; }
+
+wait_healthy() {
+    local port i
+    port="$(env_value HTTP_PORT)"; : "${port:=80}"
+    command -v curl > /dev/null 2>&1 || return 0
+    i=0
+    while [ "$i" -lt 45 ]; do
+        curl -fsS --max-time 2 "http://127.0.0.1:${port}/health" > /dev/null 2>&1 && return 0
+        sleep 2; i=$((i + 1))
+    done
+    return 1
+}
+
+backup_db() {
+    local f
+    mkdir -p backups
+    f="backups/scada-$(date -u +%Y%m%dT%H%M%SZ).dump"
+    dc exec -T db pg_dump -U scada -Fc scada > "$f"
+    cp .env "$f.env"
+    printf '%s\n' "$f"
+}
+
+apply_update() {
+    local keep_backup="${1:-yes}" dump=""
+    info "Menarik image terbaru..."
+    dc pull
+    if [ "$keep_backup" = "yes" ] && [ -n "$(dc ps -q db 2>/dev/null)" ]; then
+        info "Mencadangkan database dulu..."
+        dump="$(backup_db)"
+        ok "Cadangan: $dump"
+    fi
+    dc up -d --wait db redis
+    info "Migrasi database..."
+    dc run --rm -T api alembic upgrade head
+    info "Menyalakan ulang layanan..."
+    dc up -d
+    image_state > .update-state
+    if wait_healthy; then
+        ok "Pembaruan selesai — $(url)"
+    else
+        err "Layanan belum sehat setelah pembaruan. Periksa: scada logs api"
+        [ -n "$dump" ] && err "Pulihkan bila perlu: scada restore $dump"
+        return 1
+    fi
+}
+
+# ── Pembaruan otomatis ───────────────────────────────────────────────────────
+update_time()  { local t; t="$(env_value AUTO_UPDATE_AT)"; printf '%s' "${t:-02:30}"; }
+sudo_if_needed() { if [ "$(id -u)" -ne 0 ] && command -v sudo > /dev/null 2>&1; then printf 'sudo'; fi; }
+has_systemd()  { command -v systemctl > /dev/null 2>&1 && [ -d /etc/systemd/system ]; }
+
+enable_autoupdate() {
+    local at hh mm sudo_cmd
+    at="$(update_time)"; hh="${at%%:*}"; mm="${at##*:}"
+    env_set AUTO_UPDATE on
+    env_set AUTO_UPDATE_AT "$at"
+    image_state > .update-state
+
+    if has_systemd; then
+        sudo_cmd="$(sudo_if_needed)"
+        $sudo_cmd tee /etc/systemd/system/scada-update.service > /dev/null <<UNIT
+[Unit]
+Description=Pembaruan otomatis SCADA
+After=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$SCADA_DIR
+ExecStart=$SCADA_DIR/scada _autoupdate
+UNIT
+        $sudo_cmd tee /etc/systemd/system/scada-update.timer > /dev/null <<UNIT
+[Unit]
+Description=Jadwal pembaruan otomatis SCADA
+
+[Timer]
+OnCalendar=*-*-* $hh:$mm:00
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+        $sudo_cmd systemctl daemon-reload
+        $sudo_cmd systemctl enable --now scada-update.timer > /dev/null
+        ok "Pembaruan otomatis aktif (systemd timer, sekitar pukul $at)"
+    elif command -v crontab > /dev/null 2>&1; then
+        local lain
+        lain="$(crontab -l 2>/dev/null | grep -v 'scada _autoupdate' || true)"
+        {
+            if [ -n "$lain" ]; then printf '%s\n' "$lain"; fi
+            printf '%s %s * * * %s _autoupdate\n' "$mm" "$hh" "$SCADA_DIR/scada"
+        } | crontab -
+        ok "Pembaruan otomatis aktif (cron, pukul $at)"
+    else
+        env_set AUTO_UPDATE off
+        err "Tidak ada systemd maupun cron — jadwalkan sendiri: $SCADA_DIR/scada _autoupdate"
+        return 1
+    fi
+}
+
+disable_autoupdate() {
+    local sudo_cmd
+    env_set AUTO_UPDATE off
+    if has_systemd && [ -f /etc/systemd/system/scada-update.timer ]; then
+        sudo_cmd="$(sudo_if_needed)"
+        $sudo_cmd systemctl disable --now scada-update.timer > /dev/null 2>&1 || true
+        $sudo_cmd rm -f /etc/systemd/system/scada-update.timer /etc/systemd/system/scada-update.service
+        $sudo_cmd systemctl daemon-reload
+    fi
+    if command -v crontab > /dev/null 2>&1 && crontab -l 2>/dev/null | grep -q 'scada _autoupdate'; then
+        local lain
+        lain="$(crontab -l 2>/dev/null | grep -v 'scada _autoupdate' || true)"
+        printf '%s' "${lain:+$lain
+}" | crontab - 2>/dev/null || true
+    fi
+    ok "Pembaruan otomatis dimatikan"
+}
+
+status_autoupdate() {
+    local state
+    state="$(env_value AUTO_UPDATE)"; : "${state:=off}"
+    printf '  status   %s\n' "$state"
+    printf '  jadwal   sekitar pukul %s setiap hari\n' "$(update_time)"
+    if has_systemd && [ -f /etc/systemd/system/scada-update.timer ]; then
+        printf '  mekanis  systemd timer\n'
+        systemctl list-timers scada-update.timer --no-pager 2>/dev/null | sed -n '2p' | sed 's/^/  berikut  /'
+    elif command -v crontab > /dev/null 2>&1 && crontab -l 2>/dev/null | grep -q 'scada _autoupdate'; then
+        printf '  mekanis  cron\n'
+    else
+        printf '  mekanis  belum terjadwal\n'
+    fi
+    if [ -f update.log ]; then
+        printf '\n  catatan terakhir:\n'
+        tail -n 8 update.log | sed 's/^/    /'
+    fi
+}
+
+run_autoupdate() {
+    exec >> "$SCADA_DIR/update.log" 2>&1
+    printf '\n=== %s ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [ "$(env_value AUTO_UPDATE)" != "on" ]; then
+        echo "pembaruan otomatis nonaktif — dilewati"
+        exit 0
+    fi
+    if ! dc pull -q; then
+        echo "registry tidak terjangkau — dicoba lagi pada jadwal berikutnya"
+        exit 0
+    fi
+    if [ "$(image_state)" = "$(applied_state)" ]; then
+        echo "sudah versi terbaru"
+        exit 0
+    fi
+    echo "versi baru ditemukan — memasang"
+    apply_update yes
+}
+
+check_update() {
+    info "Memeriksa versi terbaru..."
+    if ! dc pull -q; then
+        err "Registry tidak terjangkau."
+        return 1
+    fi
+    if [ "$(image_state)" = "$(applied_state)" ]; then
+        ok "Sudah versi terbaru."
+        return 0
+    fi
+    warn "Ada versi baru. Pasang dengan: scada update"
+    return 0
+}
 
 case "${1:-help}" in
-    start)    dc up -d ;;
-    stop)     dc stop ;;
-    restart)  dc up -d --force-recreate ;;
+    start)     dc up -d ;;
+    stop)      dc stop ;;
+    restart)   dc up -d --force-recreate ;;
     status|ps) dc ps ;;
-    logs)     shift; dc logs -f --tail=100 "$@" ;;
-    url)      url ;;
+    logs)      shift; dc logs -f --tail=100 "$@" ;;
+    url)       url ;;
     open)
         u="$(url)"
-        command -v open        > /dev/null 2>&1 && open "$u"        && exit 0
-        command -v xdg-open    > /dev/null 2>&1 && xdg-open "$u"    && exit 0
-        echo "$u" ;;
+        command -v open     > /dev/null 2>&1 && open "$u"     && exit 0
+        command -v xdg-open > /dev/null 2>&1 && xdg-open "$u" && exit 0
+        printf '%s\n' "$u" ;;
     update)
-        dc pull
-        dc up -d --wait db redis
-        dc run --rm api alembic upgrade head
-        dc up -d --force-recreate
-        printf '%s✔%s Diperbarui ke image terbaru\n' "$GRN" "$RST" ;;
+        if [ "${2:-}" = "--check" ]; then check_update; else apply_update yes; fi ;;
+    autoupdate)
+        case "${2:-status}" in
+            on)  enable_autoupdate ;;
+            off) disable_autoupdate ;;
+            *)   status_autoupdate ;;
+        esac ;;
+    _autoupdate) run_autoupdate ;;
     enroll)
         code="${2:-}"
-        [ -n "$code" ] || { printf '%s✘%s Sertakan kode: scada enroll enr_xxxx\n' "$RED" "$RST"; exit 1; }
-        if grep -q '^AGENT_ENROLLMENT_CODE=' .env; then
-            sed -i.bak "s|^AGENT_ENROLLMENT_CODE=.*|AGENT_ENROLLMENT_CODE=$code|" .env && rm -f .env.bak
-        else
-            printf 'AGENT_ENROLLMENT_CODE=%s\n' "$code" >> .env
-        fi
+        [ -n "$code" ] || { err "Sertakan kode: scada enroll enr_xxxx"; exit 1; }
+        env_set AGENT_ENROLLMENT_CODE "$code"
         dc up -d --force-recreate agent
-        printf '%s✔%s Agent didaftarkan. Pantau: scada logs agent\n' "$GRN" "$RST" ;;
+        ok "Agent didaftarkan. Pantau: scada logs agent" ;;
     backup)
-        mkdir -p backups
-        f="backups/scada-$(date -u +%Y%m%dT%H%M%SZ).dump"
-        dc exec -T db pg_dump -U scada -Fc scada > "$f"
-        cp .env "$f.env"
-        printf '%s✔%s Cadangan: %s %s(.env ikut disalin — wajib untuk membuka kredensial device)%s\n' \
-            "$GRN" "$RST" "$f" "$DIM" "$RST" ;;
+        f="$(backup_db)"
+        ok "Cadangan: $f ${DIM}(.env ikut disalin — wajib untuk membuka kredensial device)${RST}" ;;
     restore)
         f="${2:-}"
-        [ -f "$f" ] || { printf '%s✘%s Berkas dump tidak ditemukan: %s\n' "$RED" "$RST" "$f"; exit 1; }
+        [ -f "$f" ] || { err "Berkas dump tidak ditemukan: $f"; exit 1; }
         dc exec -T db pg_restore -U scada -d scada --clean --if-exists < "$f"
-        printf '%s✔%s Dipulihkan dari %s\n' "$GRN" "$RST" "$f" ;;
+        ok "Dipulihkan dari $f" ;;
     uninstall)
         printf 'Hapus SELURUH data SCADA di %s? Ketik "hapus" untuk lanjut: ' "$SCADA_DIR"
         read -r c
         [ "$c" = "hapus" ] || { echo "Dibatalkan."; exit 1; }
+        disable_autoupdate || true
         dc down -v
-        printf '%s✔%s Kontainer dan volume dihapus. Sisa berkas ada di %s\n' "$GRN" "$RST" "$SCADA_DIR" ;;
+        ok "Kontainer dan volume dihapus. Sisa berkas ada di $SCADA_DIR" ;;
     *)
         printf '%sSCADA%s — %s\n\n' "$CYN" "$RST" "$SCADA_DIR"
         printf '  scada start | stop | restart | status\n'
-        printf '  scada logs [layanan]     ikuti log (api, web, worker, agent, db)\n'
-        printf '  scada open | url         buka antarmuka\n'
-        printf '  scada update             tarik image terbaru + migrasi\n'
-        printf '  scada enroll enr_xxxx    daftarkan edge agent\n'
-        printf '  scada backup             cadangkan database + .env\n'
-        printf '  scada restore <berkas>   pulihkan dari cadangan\n'
-        printf '  scada uninstall          hapus kontainer dan volume\n\n' ;;
+        printf '  scada logs [layanan]      ikuti log (api, web, worker, agent, db)\n'
+        printf '  scada open | url          buka antarmuka\n'
+        printf '  scada update              pasang versi terbaru sekarang\n'
+        printf '  scada update --check      lihat apakah ada versi baru\n'
+        printf '  scada autoupdate on|off   pembaruan otomatis harian\n'
+        printf '  scada autoupdate          status dan jadwalnya\n'
+        printf '  scada enroll enr_xxxx     daftarkan edge agent\n'
+        printf '  scada backup              cadangkan database + .env\n'
+        printf '  scada restore <berkas>    pulihkan dari cadangan\n'
+        printf '  scada uninstall           hapus kontainer dan volume\n\n' ;;
 esac
 CLI
     chmod +x scada
@@ -574,6 +779,8 @@ Opsi:
   --admin-email <email>   email admin
   --admin-password <pw>   kata sandi admin (min. 8 karakter)
   --tag <versi>           tag image (default: latest)
+  --auto-update on|off    pembaruan otomatis harian (default: on)
+  --update-at HH:MM       jam pembaruan otomatis (default: 02:30)
   --https                 aktifkan TLS internal Caddy
   --no-docker-install     jangan pasang Docker otomatis
   --yes, -y               jangan bertanya apa pun
@@ -606,6 +813,8 @@ ADMIN_NAME="${SCADA_ADMIN_NAME:-Administrator}"
 ADMIN_EMAIL="${SCADA_ADMIN_EMAIL:-}"
 ADMIN_PASSWORD="${SCADA_ADMIN_PASSWORD:-}"
 IMAGE_TAG="${SCADA_TAG:-latest}"
+AUTO_UPDATE="${SCADA_AUTO_UPDATE:-}"
+AUTO_UPDATE_AT="${SCADA_UPDATE_AT:-02:30}"
 ASSUME_YES=0
 AUTO_DOCKER=1
 UNINSTALL=0
@@ -626,6 +835,9 @@ main() {
             --admin-email)    ADMIN_EMAIL="$2";    shift 2 ;;
             --admin-password) ADMIN_PASSWORD="$2"; shift 2 ;;
             --tag)            IMAGE_TAG="$2";      shift 2 ;;
+            --auto-update)    AUTO_UPDATE="$2";    shift 2 ;;
+            --no-auto-update) AUTO_UPDATE="off";   shift ;;
+            --update-at)      AUTO_UPDATE_AT="$2"; shift 2 ;;
             --http)           SCHEME="http";       shift ;;
             --https)          SCHEME="https";      shift ;;
             --no-docker-install) AUTO_DOCKER=0;    shift ;;
@@ -707,6 +919,13 @@ main() {
     step "3/7  Akun admin"
     if [ -f .env ]; then
         ok "Instalasi lama terdeteksi — .env dipertahankan, admin tidak dibuat ulang"
+        if ! grep -q '^AUTO_UPDATE=' .env; then
+            printf '\n# Pembaruan otomatis harian. Matikan di instalasi air-gapped: scada autoupdate off\nAUTO_UPDATE=%s\nAUTO_UPDATE_AT=%s\n' \
+                "${AUTO_UPDATE:-on}" "$AUTO_UPDATE_AT" >> .env
+        elif [ -n "$AUTO_UPDATE" ]; then
+            sed -i.bak "s|^AUTO_UPDATE=.*|AUTO_UPDATE=$AUTO_UPDATE|" .env && rm -f .env.bak
+        fi
+        AUTO_UPDATE="$(env_value AUTO_UPDATE)"
     else
         FRESH=1
         if [ "$ASSUME_YES" -eq 1 ]; then
@@ -718,6 +937,15 @@ main() {
                 ADMIN_PASSWORD="$(ask_secret 'Kata sandi admin (min. 8 karakter):')"
                 if [ "${#ADMIN_PASSWORD}" -lt 8 ]; then warn "Terlalu pendek, coba lagi."; fi
             done
+        fi
+        if [ -z "$AUTO_UPDATE" ]; then
+            if [ "$ASSUME_YES" -eq 1 ]; then
+                AUTO_UPDATE="on"
+            elif confirm "Pasang pembaruan otomatis setiap malam pukul $AUTO_UPDATE_AT?"; then
+                AUTO_UPDATE="on"
+            else
+                AUTO_UPDATE="off"
+            fi
         fi
         write_env
         ok "Konfigurasi dan rahasia dibuat"
@@ -732,12 +960,12 @@ main() {
 
     step "5/7  Database"
     dc up -d --wait db redis
-    dc run --rm api alembic upgrade head
-    dc run --rm api python -m app.db.seed
+    dc run --rm -T api alembic upgrade head
+    dc run --rm -T api python -m app.db.seed
     ok "Skema dan data awal siap"
 
     if [ "$FRESH" -eq 1 ]; then
-        dc run --rm \
+        dc run --rm -T \
             -e "BOOTSTRAP_ORG_NAME=$ORG_NAME" \
             -e "BOOTSTRAP_ADMIN_NAME=$ADMIN_NAME" \
             -e "BOOTSTRAP_ADMIN_EMAIL=$ADMIN_EMAIL" \
@@ -765,11 +993,25 @@ main() {
     write_cli
     ok "Terpasang: $CLI_PATH"
 
+    if [ "${AUTO_UPDATE:-off}" = "on" ]; then
+        if ! ./scada autoupdate on; then
+            AUTO_UPDATE="off"
+            warn "Penjadwalan gagal — jalankan sendiri nanti: scada autoupdate on"
+        fi
+    else
+        ./scada autoupdate off > /dev/null 2>&1 || true
+        ok "Pembaruan otomatis mati — pasang manual dengan: scada update"
+    fi
+
     printf '\n%s%s%s\n' "$GRN" "  ✔  SCADA siap dipakai" "$RST"
     printf '\n'
     printf '     Buka       %s%s%s\n' "$BLD" "$PUBLIC_URL" "$RST"
     if [ -n "$ADMIN_EMAIL" ]; then printf '     Login      %s\n' "$ADMIN_EMAIL"; fi
     printf '     Kelola     %sscada%s  (start, stop, logs, update, backup)\n' "$BLD" "$RST"
+    if [ "${AUTO_UPDATE:-off}" = "on" ]; then
+        printf '     Pembaruan  otomatis tiap malam pukul %s  %s(scada autoupdate off untuk mematikan)%s\n' \
+            "$AUTO_UPDATE_AT" "$DIM" "$RST"
+    fi
     printf '\n'
     printf '     %sLangkah berikutnya: buat agen di UI → Agen → salin kode → jalankan%s\n' "$DIM" "$RST"
     printf '     %sscada enroll enr_xxxx%s\n\n' "$DIM" "$RST"
