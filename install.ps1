@@ -31,7 +31,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScadaVersion = '2.1.1'
+$ScadaVersion = '2.1.2'
 
 if (-not $Dir)       { $Dir       = Join-Path $env:USERPROFILE 'scada' }
 if (-not $OrgName)   { $OrgName   = 'SCADA' }
@@ -63,6 +63,13 @@ function Save-Text ([string]$Path, [string]$Text) {
     $lf = $Text -replace "`r`n", "`n"
     if (-not $lf.EndsWith("`n")) { $lf += "`n" }
     [System.IO.File]::WriteAllText($Path, $lf, $utf8NoBom)
+}
+
+function Get-EnvLine ([string]$Path, [string]$Key) {
+    if (-not (Test-Path $Path)) { return $null }
+    $line = Select-String -Path $Path -Pattern "^$Key=" | Select-Object -First 1
+    if ($null -eq $line) { return $null }
+    return $line.Line.Substring($Key.Length + 1)
 }
 
 function Set-EnvLine ([string]$Path, [string]$Key, [string]$Value) {
@@ -836,6 +843,26 @@ if (Test-Path $EnvPath) {
     } else {
         $AutoUpdate = (($envText -split "`n" | Where-Object { $_ -match '^AUTO_UPDATE=' } |
                         Select-Object -First 1) -replace '^AUTO_UPDATE=', '')
+    }
+
+    # Alamat di .env dibekukan dari pemasangan sebelumnya, sedangkan $PublicUrl
+    # baru saja dideteksi ulang. Kalau DHCP mengubah alamat mesin, `scada url`
+    # dan `scada open` akan mengarah ke alamat yang tidak menjawab.
+    $storedUrl = Get-EnvLine $EnvPath 'PUBLIC_URL'
+    if ($storedUrl -and $storedUrl -ne $PublicUrl) {
+        # SITE_ADDRESS `:80` cocok dengan host apa pun, jadi alamat di .env hanya
+        # dipakai untuk ditampilkan — aman ditulis ulang. Pemasangan https lain
+        # perkara: nama host-nya ikut menentukan sertifikat.
+        if ((Get-EnvLine $EnvPath 'SITE_ADDRESS') -eq ':80') {
+            Set-EnvLine $EnvPath 'PUBLIC_URL' $PublicUrl
+            Set-EnvLine $EnvPath 'CORS_ORIGINS' $PublicUrl
+            Set-EnvLine $EnvPath 'NEXT_PUBLIC_WS_URL' ($PublicUrl -replace '^http', 'ws')
+            Write-Warn2 "Alamat mesin berubah ($storedUrl -> $PublicUrl). .env diperbarui otomatis."
+        } else {
+            Write-Warn2 "Alamat di .env ($storedUrl) tidak sama dengan alamat mesin ini ($PublicUrl)."
+            Write-Warn2 'Pemasangan https terikat nama host, jadi .env tidak diubah otomatis.'
+            Write-Warn2 'Sunting SITE_ADDRESS/PUBLIC_URL/CORS_ORIGINS lalu jalankan: scada restart'
+        }
     }
 }
 

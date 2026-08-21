@@ -26,7 +26,7 @@
 #
 set -euo pipefail
 
-SCADA_VERSION="2.1.1"
+SCADA_VERSION="2.1.2"
 
 RED=''; GRN=''; YLW=''; CYN=''; DIM=''; BLD=''; RST=''
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -143,6 +143,76 @@ detect_ip() {
             ;;
     esac
     printf '%s' "${ip:-localhost}"
+}
+
+local_ips() {
+    case "$OS" in
+        macos) ifconfig 2>/dev/null | awk '/inet /{print $2}' ;;
+        linux)
+            if have ip; then
+                ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1
+            else
+                ifconfig 2>/dev/null | awk '/inet /{print $2}' | sed 's/addr://'
+            fi ;;
+    esac
+}
+
+url_host() {
+    h="${1#*://}"; h="${h%%/*}"; printf '%s' "${h%%:*}"
+}
+
+url_port() {
+    h="${1#*://}"; h="${h%%/*}"
+    case "$h" in *:*) printf '%s' "${h##*:}" ;; esac
+}
+
+is_ipv4() {
+    printf '%s' "$1" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+}
+
+# Alamat di .env dibekukan dari pemasangan sebelumnya. Bila DHCP sudah memberi
+# mesin ini alamat lain, pemasang akan menyuruh membuka alamat yang tidak
+# menjawab — persis seperti instalasi gagal, padahal seluruh layanan sehat.
+check_address_drift() {
+    local host port actual ws found ip
+    host="$(url_host "$PUBLIC_URL")"
+    if ! is_ipv4 "$host"; then return 0; fi
+    case "$host" in 127.*) return 0 ;; esac
+
+    found=0
+    for ip in $(local_ips); do
+        if [ "$ip" = "$host" ]; then found=1; break; fi
+    done
+    if [ "$found" -eq 1 ]; then return 0; fi
+
+    actual="$(detect_ip)"
+    if [ "$actual" = "localhost" ] || [ "$actual" = "$host" ]; then
+        warn "Alamat di .env ($host) bukan alamat mesin ini, dan alamat baru tidak terdeteksi."
+        warn "Akses lewat http://localhost bila membuka dari mesin ini sendiri."
+        return 0
+    fi
+
+    port="$(url_port "$PUBLIC_URL")"
+    if [ -n "$port" ]; then
+        actual="$actual:$port"
+    fi
+
+    # SITE_ADDRESS `:80` cocok dengan host apa pun, jadi alamat di .env hanya
+    # dipakai untuk ditampilkan — aman ditulis ulang. Pemasangan https lain
+    # perkara: nama host-nya ikut menentukan sertifikat.
+    if [ "$(env_value SITE_ADDRESS)" = ":80" ]; then
+        ws="$(printf 'http://%s' "$actual" | sed 's|^http|ws|')"
+        env_set PUBLIC_URL "http://$actual"
+        env_set CORS_ORIGINS "http://$actual"
+        env_set NEXT_PUBLIC_WS_URL "$ws"
+        PUBLIC_URL="http://$actual"
+        ADDRESS_FIXED=1
+        warn "Alamat mesin berubah ($host → $actual). .env diperbarui otomatis."
+    else
+        warn "Alamat di .env ($host) bukan lagi alamat mesin ini — sekarang $actual."
+        warn "Pemasangan https terikat nama host, jadi .env tidak diubah otomatis."
+        warn "Sunting SITE_ADDRESS/PUBLIC_URL/CORS_ORIGINS lalu jalankan: scada restart"
+    fi
 }
 
 env_value() {
@@ -962,6 +1032,7 @@ FRESH=0
 REUSED_ENV=0
 HEALTHY=2
 AGENT_PROVISIONED=0
+ADDRESS_FIXED=0
 
 main() {
     while [ $# -gt 0 ]; do
@@ -1040,7 +1111,12 @@ main() {
     fi
 
     if [ "$REUSED_ENV" -eq 1 ]; then
-        ok "Alamat server: $PUBLIC_URL ${DIM}(dari .env yang sudah ada)${RST}"
+        check_address_drift
+        if [ "$ADDRESS_FIXED" -eq 1 ]; then
+            ok "Alamat server: $PUBLIC_URL ${DIM}(dideteksi ulang)${RST}"
+        else
+            ok "Alamat server: $PUBLIC_URL ${DIM}(dari .env yang sudah ada)${RST}"
+        fi
     elif [ "$SCHEME" = "https" ]; then
         SITE_ADDRESS="https://${HOST}"
         PUBLIC_URL="$SITE_ADDRESS"

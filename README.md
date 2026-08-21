@@ -147,6 +147,22 @@ Agen tambahan di komputer lain:
 1. buka UI → **Agen** → **Buat Agen Baru** → salin kode `enr_xxxx`
 2. `scada enroll enr_xxxx`
 
+## Alamat server berubah (DHCP)
+
+Alamat disimpan di `.env` saat pemasangan pertama. Bila router memberi mesin itu IP lain di
+kemudian hari, menjalankan ulang installer akan mendeteksinya: alamat di `.env` dibandingkan
+dengan alamat mesin, dan bila tidak ada yang cocok installer memperingatkan lalu **memperbarui
+`PUBLIC_URL`, `CORS_ORIGINS`, dan `NEXT_PUBLIC_WS_URL`** ke alamat yang benar.
+
+Perbaikan otomatis itu hanya berlaku pada pemasangan HTTP (`SITE_ADDRESS=:80`), yang menerima
+host apa pun sehingga alamat di `.env` cuma dipakai untuk ditampilkan. Pemasangan HTTPS terikat
+nama host — sertifikatnya diterbitkan untuk nama itu — jadi installer hanya memperingatkan dan
+menyerahkan suntingannya kepada Anda.
+
+Aplikasinya sendiri tetap jalan meski alamat di `.env` basi; yang salah hanya alamat yang
+ditampilkan dan yang dibuka `scada open`. Untuk pemakaian sungguhan, beri reservasi DHCP atau
+IP statis agar alamatnya tidak berpindah.
+
 ## Nama project Docker Compose
 
 Pemasangan baru menulis `COMPOSE_PROJECT_NAME=scada-onprem` ke `.env`, jadi container dan
