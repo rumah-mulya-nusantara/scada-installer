@@ -147,6 +147,19 @@ Agen tambahan di komputer lain:
 1. buka UI → **Agen** → **Buat Agen Baru** → salin kode `enr_xxxx`
 2. `scada enroll enr_xxxx`
 
+## Nama project Docker Compose
+
+Pemasangan baru menulis `COMPOSE_PROJECT_NAME=scada-onprem` ke `.env`, jadi container dan
+volumenya berdiri sendiri. Ini penting di mesin yang juga memuat checkout pengembangan
+`scada_ruanglab`: `docker-compose.yml` di sana memakai `name: scada-ruanglab` yang sama dengan
+berkas compose di repo ini, dan tanpa pemisahan itu keduanya berbagi volume Postgres. Gejalanya
+`password authentication failed for user "scada"` saat migrasi — `POSTGRES_PASSWORD` hanya
+berlaku ketika direktori data masih kosong, jadi volume milik stack lain menolak password baru.
+
+Instalasi lama tidak punya baris itu dan tetap memakai `scada-ruanglab`, sehingga volumenya
+tidak berpindah. Jangan menambahkannya ke `.env` yang sudah berjalan — itu membuat stack
+menyala dengan database kosong.
+
 ## Isi repo
 
 | Berkas | Peran |

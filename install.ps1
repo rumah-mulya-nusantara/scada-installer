@@ -31,7 +31,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScadaVersion = '2.1.0'
+$ScadaVersion = '2.1.1'
 
 if (-not $Dir)       { $Dir       = Join-Path $env:USERPROFILE 'scada' }
 if (-not $OrgName)   { $OrgName   = 'SCADA' }
@@ -890,6 +890,13 @@ if (-not (Test-Path $EnvPath)) {
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     $envText = @"
 # Dibuat oleh install.ps1 v$ScadaVersion — $stamp
+# Nama project Docker Compose. Berdiri sendiri supaya pemasangan ini tidak pernah
+# berbagi container atau volume dengan stack lain di mesin yang sama — misalnya
+# checkout pengembangan, yang compose-nya memakai nama bawaan yang sama.
+# Instalasi lama tidak punya baris ini dan tetap memakai nama bawaan itu, jadi
+# volumenya tidak berpindah.
+COMPOSE_PROJECT_NAME=scada-onprem
+
 DEPLOYMENT_MODE=onprem
 ENVIRONMENT=production
 LOG_LEVEL=INFO

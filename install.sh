@@ -26,7 +26,7 @@
 #
 set -euo pipefail
 
-SCADA_VERSION="2.1.0"
+SCADA_VERSION="2.1.1"
 
 RED=''; GRN=''; YLW=''; CYN=''; DIM=''; BLD=''; RST=''
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -455,6 +455,13 @@ write_env() {
     umask 077
     cat > .env <<ENV
 # Dibuat oleh install.sh v$SCADA_VERSION — $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Nama project Docker Compose. Berdiri sendiri supaya pemasangan ini tidak pernah
+# berbagi container atau volume dengan stack lain di mesin yang sama — misalnya
+# checkout pengembangan, yang compose-nya memakai nama bawaan yang sama.
+# Instalasi lama tidak punya baris ini dan tetap memakai nama bawaan itu, jadi
+# volumenya tidak berpindah.
+COMPOSE_PROJECT_NAME=scada-onprem
+
 DEPLOYMENT_MODE=onprem
 ENVIRONMENT=production
 LOG_LEVEL=INFO
