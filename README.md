@@ -132,12 +132,20 @@ tidak bisa dibuka lagi — simpan keduanya.
 
 ## Edge agent
 
-Agent ikut naik bersama stack tapi diam sampai didaftarkan:
+**Tidak ada langkah manual.** Installer membuat agen bernama **Agen Lokal** lewat
+`python -m app.db.provision_agent`, menaruh kode enrolmennya di `.env`, lalu menunggu sampai
+log agen memastikan enrolment berhasil. Selesai instalasi, PLC di jaringan yang sama sudah
+bisa langsung dibaca — tinggal tambahkan device di UI dan tugaskan ke agen itu.
+
+Setelah enrolment, kuncinya tersimpan di volume `agent_state`; kodenya tidak diperlukan lagi.
+
+Agen yang **sudah punya kunci tidak pernah diberi kode baru** — menerbitkan kode berarti
+mencabut kunci agen yang sedang berjalan — jadi menjalankan ulang installer aman.
+
+Agen tambahan di komputer lain:
 
 1. buka UI → **Agen** → **Buat Agen Baru** → salin kode `enr_xxxx`
 2. `scada enroll enr_xxxx`
-
-Setelah enrolment, kuncinya tersimpan di volume `agent_state`; kodenya tidak diperlukan lagi.
 
 ## Isi repo
 

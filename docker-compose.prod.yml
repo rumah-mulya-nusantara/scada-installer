@@ -111,11 +111,11 @@ services:
 
   # ─── Edge agent ────────────────────────────────────────────────────────────
   #
-  # Ikut naik bersama `scada start`. Pertama kali jalankan:
-  #   1. Buka UI → Agen → Buat agen baru → salin enrollment code
-  #   2. Jalankan: scada enroll enr_xxxx
+  # Ikut naik bersama `scada start`. Installer sudah membuat agen "Agen Lokal"
+  # dan mengisi AGENT_ENROLLMENT_CODE di .env, jadi tidak ada langkah manual.
   # Setelah enrolment, kunci tersimpan di volume agent_state — kode tidak
   # diperlukan lagi dan bisa dikosongkan.
+  # Menambah agen di komputer lain: UI → Agen → Buat agen baru.
   agent:
     image: ghcr.io/rumah-mulya-nusantara/scada-agent:${IMAGE_TAG:-latest}
     restart: on-failure

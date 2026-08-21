@@ -26,7 +26,7 @@
 #
 set -euo pipefail
 
-SCADA_VERSION="2.0.0"
+SCADA_VERSION="2.1.0"
 
 RED=''; GRN=''; YLW=''; CYN=''; DIM=''; BLD=''; RST=''
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -148,6 +148,14 @@ detect_ip() {
 env_value() {
     [ -f .env ] || return 0
     sed -n "s/^$1=//p" .env | head -1
+}
+
+env_set() {
+    if grep -q "^$1=" .env 2>/dev/null; then
+        sed -i.bak "s|^$1=.*|$1=$2|" .env && rm -f .env.bak
+    else
+        printf '%s=%s\n' "$1" "$2" >> .env
+    fi
 }
 
 port_busy() {
@@ -362,11 +370,11 @@ services:
 
   # ─── Edge agent ────────────────────────────────────────────────────────────
   #
-  # Ikut naik bersama `scada start`. Pertama kali jalankan:
-  #   1. Buka UI → Agen → Buat agen baru → salin enrollment code
-  #   2. Jalankan: scada enroll enr_xxxx
+  # Ikut naik bersama `scada start`. Installer sudah membuat agen "Agen Lokal"
+  # dan mengisi AGENT_ENROLLMENT_CODE di .env, jadi tidak ada langkah manual.
   # Setelah enrolment, kunci tersimpan di volume agent_state — kode tidak
   # diperlukan lagi dan bisa dikosongkan.
+  # Menambah agen di komputer lain: UI → Agen → Buat agen baru.
   agent:
     image: ghcr.io/rumah-mulya-nusantara/scada-agent:${IMAGE_TAG:-latest}
     restart: on-failure
@@ -470,7 +478,7 @@ REFRESH_TOKEN_EXPIRE_DAYS=30
 COOKIE_SECURE=$cookie_secure
 COOKIE_DOMAIN=
 
-# Diisi otomatis oleh: scada enroll enr_xxxx
+# Diisi otomatis oleh installer (agen "Agen Lokal"), atau: scada enroll enr_xxxx
 AGENT_ENROLLMENT_CODE=
 AGENT_LOG_LEVEL=INFO
 
@@ -946,6 +954,7 @@ PUBLIC_URL=""
 FRESH=0
 REUSED_ENV=0
 HEALTHY=2
+AGENT_PROVISIONED=0
 
 main() {
     while [ $# -gt 0 ]; do
@@ -1114,6 +1123,27 @@ main() {
         ok "Akun admin dibuat: $ADMIN_EMAIL"
     fi
 
+    # Tanpa kode enrolment kontainer agen keluar dengan galat dan direstart
+    # terus-menerus. Agen di satu server tidak perlu ritual salin-kode dari UI,
+    # jadi installer yang menyiapkannya.
+    AGENT_PROVISIONED=0
+    agent_out="$(mktemp)"; agent_err="$(mktemp)"
+    if dc run --rm -T api python -m app.db.provision_agent > "$agent_out" 2> "$agent_err"; then
+        agent_code="$(tr -d '\r' < "$agent_out" | grep -oE '^enr_[A-Za-z0-9_-]+$' | head -1 || true)"
+        if [ -n "$agent_code" ]; then
+            env_set AGENT_ENROLLMENT_CODE "$agent_code"
+            AGENT_PROVISIONED=1
+            ok "Agen lokal disiapkan"
+        else
+            AGENT_PROVISIONED=1
+            ok "Agen lokal sudah terdaftar"
+        fi
+    else
+        warn "Penyiapan agen lokal gagal — daftarkan lewat UI → Agen, lalu: scada enroll enr_xxxx"
+        sed 's/^/    /' "$agent_err" >&2
+    fi
+    rm -f "$agent_out" "$agent_err"
+
     step "6/7  Menyalakan layanan"
     dc up -d
     printf '%s· Menunggu antarmuka siap%s' "$CYN" "$RST"
@@ -1129,6 +1159,22 @@ main() {
         done
     fi
     printf '\n'
+    if [ "$AGENT_PROVISIONED" -eq 1 ]; then
+        i=0
+        while [ "$i" -lt 20 ]; do
+            if dc logs agent 2>/dev/null | grep -qE 'Enrolment berhasil|Kunci agen dimuat'; then
+                break
+            fi
+            sleep 3; i=$((i + 1))
+        done
+        if [ "$i" -lt 20 ]; then
+            ok "Agen lokal terhubung"
+        else
+            AGENT_PROVISIONED=0
+            warn "Agen lokal belum terhubung — periksa: scada logs agent"
+        fi
+    fi
+
     case "$HEALTHY" in
         1) ok "Semua layanan berjalan" ;;
         2) warn "curl tidak tersedia — status layanan tidak diperiksa" ;;
@@ -1165,8 +1211,13 @@ main() {
             "$AUTO_UPDATE_AT" "$DIM" "$RST"
     fi
     printf '\n'
-    printf '     %sLangkah berikutnya: buat agen di UI → Agen → salin kode → jalankan%s\n' "$DIM" "$RST"
-    printf '     %sscada enroll enr_xxxx%s\n\n' "$DIM" "$RST"
+    if [ "$AGENT_PROVISIONED" -eq 1 ]; then
+        printf '     %sEdge agent "Agen Lokal" sudah berjalan — tinggal tambahkan device di UI.%s\n' "$DIM" "$RST"
+        printf '     %sAgen di komputer lain: UI → Agen → salin kode → scada enroll enr_xxxx%s\n\n' "$DIM" "$RST"
+    else
+        printf '     %sLangkah berikutnya: buat agen di UI → Agen → salin kode → jalankan%s\n' "$DIM" "$RST"
+        printf '     %sscada enroll enr_xxxx%s\n\n' "$DIM" "$RST"
+    fi
 
     case "$CLI_PATH" in
         "$HOME/.local/bin/scada")

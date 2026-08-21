@@ -31,7 +31,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScadaVersion = '2.0.0'
+$ScadaVersion = '2.1.0'
 
 if (-not $Dir)       { $Dir       = Join-Path $env:USERPROFILE 'scada' }
 if (-not $OrgName)   { $OrgName   = 'SCADA' }
@@ -63,6 +63,16 @@ function Save-Text ([string]$Path, [string]$Text) {
     $lf = $Text -replace "`r`n", "`n"
     if (-not $lf.EndsWith("`n")) { $lf += "`n" }
     [System.IO.File]::WriteAllText($Path, $lf, $utf8NoBom)
+}
+
+function Set-EnvLine ([string]$Path, [string]$Key, [string]$Value) {
+    $text = [System.IO.File]::ReadAllText($Path) -replace "`r`n", "`n"
+    if ($text -match "(?m)^$Key=.*$") {
+        $text = $text -replace "(?m)^$Key=.*$", "$Key=$Value"
+    } else {
+        $text = $text.TrimEnd("`n") + "`n$Key=$Value`n"
+    }
+    Save-Text $Path $text
 }
 
 function New-HexKey ([int]$Bytes) {
@@ -306,11 +316,11 @@ services:
 
   # ─── Edge agent ────────────────────────────────────────────────────────────
   #
-  # Ikut naik bersama `scada start`. Pertama kali jalankan:
-  #   1. Buka UI → Agen → Buat agen baru → salin enrollment code
-  #   2. Jalankan: scada enroll enr_xxxx
+  # Ikut naik bersama `scada start`. Installer sudah membuat agen "Agen Lokal"
+  # dan mengisi AGENT_ENROLLMENT_CODE di .env, jadi tidak ada langkah manual.
   # Setelah enrolment, kunci tersimpan di volume agent_state — kode tidak
   # diperlukan lagi dan bisa dikosongkan.
+  # Menambah agen di komputer lain: UI → Agen → Buat agen baru.
   agent:
     image: ghcr.io/rumah-mulya-nusantara/scada-agent:${IMAGE_TAG:-latest}
     restart: on-failure
@@ -903,7 +913,7 @@ REFRESH_TOKEN_EXPIRE_DAYS=30
 COOKIE_SECURE=$CookieSecure
 COOKIE_DOMAIN=
 
-# Diisi otomatis oleh: scada enroll enr_xxxx
+# Diisi otomatis oleh installer (agen "Agen Lokal"), atau: scada enroll enr_xxxx
 AGENT_ENROLLMENT_CODE=
 AGENT_LOG_LEVEL=INFO
 
@@ -942,6 +952,25 @@ if ($Fresh) {
     Write-Ok "Akun admin dibuat: $AdminEmail"
 }
 
+# Tanpa kode enrolment kontainer agen keluar dengan galat dan direstart
+# terus-menerus. Agen di satu server tidak perlu ritual salin-kode dari UI,
+# jadi installer yang menyiapkannya.
+$AgentProvisioned = $false
+$agentOut = Invoke-DockerQuiet compose -f 'docker-compose.prod.yml' run --rm -T api python -m app.db.provision_agent
+$agentExit = $LASTEXITCODE
+if ($agentExit -eq 0) {
+    $AgentProvisioned = $true
+    $m = [regex]::Match(($agentOut -join "`n"), 'enr_[A-Za-z0-9_-]+')
+    if ($m.Success) {
+        Set-EnvLine $EnvPath 'AGENT_ENROLLMENT_CODE' $m.Value
+        Write-Ok 'Agen lokal disiapkan'
+    } else {
+        Write-Ok 'Agen lokal sudah terdaftar'
+    }
+} else {
+    Write-Warn2 'Penyiapan agen lokal gagal — daftarkan lewat UI → Agen, lalu: scada enroll enr_xxxx'
+}
+
 Write-Step '6/7  Menyalakan layanan'
 Invoke-Compose up -d
 Write-Host '· Menunggu antarmuka siap' -ForegroundColor Cyan -NoNewline
@@ -955,6 +984,23 @@ for ($i = 0; $i -lt 60; $i++) {
     Write-Host '.' -NoNewline
 }
 Write-Host ''
+# Enrolment yang gagal hanya terlihat sebagai kontainer yang restart terus,
+# jadi hasilnya dipastikan di sini selagi installer masih di layar.
+if ($AgentProvisioned) {
+    $agentReady = $false
+    for ($i = 0; $i -lt 20; $i++) {
+        $agentLogs = (Invoke-DockerQuiet compose -f 'docker-compose.prod.yml' logs agent) -join "`n"
+        if ($agentLogs -match 'Enrolment berhasil|Kunci agen dimuat') { $agentReady = $true; break }
+        Start-Sleep -Seconds 3
+    }
+    if ($agentReady) {
+        Write-Ok 'Agen lokal terhubung'
+    } else {
+        $AgentProvisioned = $false
+        Write-Warn2 'Agen lokal belum terhubung — periksa: scada logs agent'
+    }
+}
+
 if ($Healthy) {
     Write-Ok 'Semua layanan berjalan'
 } else {
@@ -1002,6 +1048,11 @@ if ($AutoUpdate -eq 'on') {
     Write-Host "     Pembaruan  otomatis tiap malam pukul $UpdateAt  (scada autoupdate off untuk mematikan)"
 }
 Write-Host ''
-Write-Host '     Langkah berikutnya: buat agen di UI → Agen → salin kode → jalankan' -ForegroundColor DarkGray
-Write-Host '     scada enroll enr_xxxx' -ForegroundColor DarkGray
+if ($AgentProvisioned) {
+    Write-Host '     Edge agent "Agen Lokal" sudah berjalan — tinggal tambahkan device di UI.' -ForegroundColor DarkGray
+    Write-Host '     Agen di komputer lain: UI → Agen → salin kode → scada enroll enr_xxxx' -ForegroundColor DarkGray
+} else {
+    Write-Host '     Langkah berikutnya: buat agen di UI → Agen → salin kode → jalankan' -ForegroundColor DarkGray
+    Write-Host '     scada enroll enr_xxxx' -ForegroundColor DarkGray
+}
 Write-Host ''
