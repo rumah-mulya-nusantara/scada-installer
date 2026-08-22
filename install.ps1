@@ -23,7 +23,8 @@ param(
     [string]$AdminPassword = $env:SCADA_ADMIN_PASSWORD,
     [string]$ImageTag      = $env:SCADA_TAG,
     # Alamat portal aktivasi vendor. Hanya ditampilkan sebagai tautan di halaman
-    # Lisensi; server ini tidak pernah menghubunginya. Kosong = tautan tidak muncul.
+    # Lisensi; server ini tidak pernah menghubunginya. Tidak diisi = pakai
+    # $ScadaDefaultPortalUrl di bawah; isi `off` untuk menghilangkan tautannya.
     [string]$LicensePortalUrl = $env:SCADA_LICENSE_PORTAL_URL,
     [string]$AutoUpdate    = $env:SCADA_AUTO_UPDATE,
     [string]$UpdateAt      = $env:SCADA_UPDATE_AT,
@@ -35,6 +36,30 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ScadaVersion = '2.1.2'
+
+# Alamat portal aktivasi lisensi. Bawaan produk, bukan bawaan installer: nilai
+# ini ikut ke setiap OS dan ke setiap instalasi yang di-upgrade, jadi pemasang
+# tidak perlu mengingat env var apa pun. Alamatnya cuma ditampilkan sebagai
+# tautan di halaman Lisensi — server ini tidak pernah menghubunginya.
+# Menimpanya:   $env:SCADA_LICENSE_PORTAL_URL = '<url>'
+# Mematikannya: $env:SCADA_LICENSE_PORTAL_URL = 'off'
+$ScadaDefaultPortalUrl = 'https://script.google.com/macros/s/AKfycbzwt6nvIcdsc2X-FjjaIXO7Ecc7bSa3kOPwoXMeU9SlVWl7ToqsIs_7sG9P3wgaVZg/exec'
+
+# PowerShell dan cmd.exe menghapus variabel yang diisi string kosong, jadi di
+# sana "kosong" tidak bisa dibedakan dari "tidak diisi" — dan "tidak diisi"
+# harus jatuh ke bawaan di atas. Karena itu mematikan portal butuh kata kunci.
+function Normalize-PortalUrl ([string]$Value) {
+    if (-not $Value) { return '' }
+    if ($Value.Trim().ToLowerInvariant() -in @('off', 'none', 'no', '-', 'false')) { return '' }
+    return $Value.Trim()
+}
+
+# Override yang eksplisit boleh menimpa alamat yang sudah tersimpan di .env;
+# tanpa penanda ini, alamat yang pelanggan atur sendiri lewat `scada portal`
+# akan terhapus setiap kali installer dijalankan lagi.
+$PortalExplicit = [bool]$LicensePortalUrl
+if (-not $LicensePortalUrl) { $LicensePortalUrl = $ScadaDefaultPortalUrl }
+$LicensePortalUrl = Normalize-PortalUrl $LicensePortalUrl
 
 if (-not $Dir)       { $Dir       = Join-Path $env:USERPROFILE 'scada' }
 if (-not $OrgName)   { $OrgName   = 'SCADA' }
@@ -77,8 +102,12 @@ function Get-EnvLine ([string]$Path, [string]$Key) {
 
 function Set-EnvLine ([string]$Path, [string]$Key, [string]$Value) {
     $text = [System.IO.File]::ReadAllText($Path) -replace "`r`n", "`n"
-    if ($text -match "(?m)^$Key=.*$") {
-        $text = $text -replace "(?m)^$Key=.*$", "$Key=$Value"
+    # `$` punya arti khusus di bagian pengganti -replace ($1, $&), jadi sebuah
+    # URL yang memuatnya akan tertulis rusak tanpa digandakan lebih dulu.
+    $safe = "$Key=$Value".Replace('$', '$$')
+    $pat  = '(?m)^' + [Regex]::Escape($Key) + '=.*$'
+    if ($text -match $pat) {
+        $text = $text -replace $pat, $safe
     } else {
         $text = $text.TrimEnd("`n") + "`n$Key=$Value`n"
     }
@@ -507,7 +536,11 @@ function Get-EnvValue ([string]$Key) {
 }
 function Set-EnvValue ([string]$Key, [string]$Value) {
     $text = [System.IO.File]::ReadAllText($EnvPath) -replace "`r`n", "`n"
-    if ($text -match "(?m)^$Key=.*$") { $text = $text -replace "(?m)^$Key=.*$", "$Key=$Value" }
+    # `$` punya arti khusus di bagian pengganti -replace ($1, $&), jadi sebuah
+    # URL yang memuatnya akan tertulis rusak tanpa digandakan lebih dulu.
+    $safe = "$Key=$Value".Replace('$', '$$')
+    $pat  = '(?m)^' + [Regex]::Escape($Key) + '=.*$'
+    if ($text -match $pat) { $text = $text -replace $pat, $safe }
     else { $text = $text.TrimEnd("`n") + "`n$Key=$Value`n" }
     Save-Text $EnvPath $text
 }
@@ -727,6 +760,31 @@ switch ($Command) {
         Compose up -d --force-recreate agent
         Write-Host '✔ Agent didaftarkan. Pantau: scada logs agent' -ForegroundColor Green
     }
+    'portal'  {
+        # Mengganti alamat portal lisensi tanpa menjalankan installer lagi —
+        # satu-satunya cara pada instalasi yang sudah berjalan.
+        $arg = [string]($Rest | Select-Object -First 1)
+        if (-not $arg) {
+            $cur = Get-EnvValue 'LICENSE_PORTAL_URL'
+            if ($cur) { Write-Host $cur }
+            else { Write-Host 'tanpa portal — halaman Lisensi menyuruh kirim kode ke vendor' }
+            break
+        }
+        if ($arg.Trim().ToLowerInvariant() -in @('off', 'none', 'no', '-', 'false')) { $arg = '' }
+        else { $arg = $arg.Trim() }
+        Set-EnvValue 'LICENSE_PORTAL_URL' $arg
+        # api dan worker membaca .env lewat env_file, jadi keduanya perlu dibuat
+        # ulang. Kalau stack memang sedang mati, jangan dinyalakan diam-diam.
+        $running = @(Compose-Quiet ps -q api | Where-Object { $_ })
+        if ($running.Count -gt 0) {
+            Compose up -d --force-recreate api worker
+            if ($arg) { Write-Host "✔ Portal lisensi: $arg" -ForegroundColor Green }
+            else { Write-Host '✔ Portal lisensi dimatikan.' -ForegroundColor Green }
+        } else {
+            if ($arg) { Write-Host "✔ Portal lisensi: $arg (berlaku setelah: scada start)" -ForegroundColor Green }
+            else { Write-Host '✔ Portal lisensi dimatikan. (berlaku setelah: scada start)' -ForegroundColor Green }
+        }
+    }
     'backup'  {
         $f = Backup-Database
         Write-Host "✔ Cadangan: $f (.env ikut disalin — wajib untuk membuka kredensial device)" -ForegroundColor Green
@@ -757,6 +815,8 @@ switch ($Command) {
         Write-Host '  scada create-admin <email> <sandi>   buat admin pertama'
         Write-Host '  scada reset-password <email> <sandi>  ganti kata sandi'
         Write-Host '  scada enroll enr_xxxx     daftarkan edge agent'
+        Write-Host '  scada portal              lihat alamat portal lisensi'
+        Write-Host '  scada portal <url>|off    ganti atau matikan tautan portal'
         Write-Host '  scada backup              cadangkan database + .env'
         Write-Host '  scada restore <berkas>    pulihkan dari cadangan'
         Write-Host '  scada uninstall           hapus kontainer dan volume'
@@ -847,6 +907,20 @@ if (Test-Path $EnvPath) {
         $AutoUpdate = (($envText -split "`n" | Where-Object { $_ -match '^AUTO_UPDATE=' } |
                         Select-Object -First 1) -replace '^AUTO_UPDATE=', '')
     }
+
+    # Alamat portal adalah bawaan produk, jadi instalasi lama ikut kena: baris
+    # yang belum ada atau masih kosong diisi sekarang. Alamat yang sudah terisi
+    # tidak disentuh kecuali override eksplisit — pelanggan boleh punya
+    # portalnya sendiri, atau sengaja mematikannya lewat `scada portal off`,
+    # dan itu harus bertahan lewat upgrade.
+    $storedPortal = Get-EnvLine $EnvPath 'LICENSE_PORTAL_URL'
+    if ($PortalExplicit) {
+        Set-EnvLine $EnvPath 'LICENSE_PORTAL_URL' $LicensePortalUrl
+    } elseif (-not $storedPortal) {
+        Set-EnvLine $EnvPath 'LICENSE_PORTAL_URL' $LicensePortalUrl
+        if ($LicensePortalUrl) { Write-Ok "Portal lisensi diisi: $LicensePortalUrl" }
+    }
+    $LicensePortalUrl = [string](Get-EnvLine $EnvPath 'LICENSE_PORTAL_URL')
 
     # Alamat di .env dibekukan dari pemasangan sebelumnya, sedangkan $PublicUrl
     # baru saja dideteksi ulang. Kalau DHCP mengubah alamat mesin, `scada url`

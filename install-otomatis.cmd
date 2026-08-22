@@ -19,7 +19,10 @@ set "SCADA_ADMIN_EMAIL=admin@pabrik.co.id"
 set "SCADA_ADMIN_PASSWORD="
 set "SCADA_ORG=Nama Perusahaan"
 
-REM Opsional. Kosongkan kalau tidak dipakai.
+REM Opsional. Alamat portal aktivasi lisensi sudah punya bawaan di dalam
+REM install.ps1, jadi baris ini boleh dibiarkan kosong - bawaannya yang dipakai.
+REM Isi dengan URL lain untuk menimpanya, atau dengan kata `off` untuk memasang
+REM tanpa tautan portal sama sekali (jaringan yang terputus dari internet).
 set "SCADA_LICENSE_PORTAL_URL="
 REM ----------------------------------------------------------------------------
 

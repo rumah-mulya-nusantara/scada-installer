@@ -84,16 +84,57 @@ Kode aktivasi hanya memuat sidik pemasangan — bukan data proses, bukan
 kredensial. **Server tidak pernah menghubungi siapa pun**, termasuk saat
 aktivasi; pelanggan sendiri yang menyerahkan kodenya.
 
+### Portal pengajuan
+
+Alamat portal pengajuan adalah **bawaan produk, bukan bawaan installer**: nilai
+yang sama sudah tertanam di `install.sh` dan `install.ps1`, jadi pemasangan di
+Linux, macOS, maupun Windows mendapatkannya tanpa env var apa pun — dan upgrade
+di instalasi yang sudah berjalan ikut terisi (baris `LICENSE_PORTAL_URL` yang
+belum ada atau masih kosong diisi saat installer dijalankan lagi).
+
+Alamatnya cuma **ditampilkan sebagai tautan** di halaman Lisensi supaya
+pelanggan tahu harus ke mana; tidak ada permintaan jaringan dari server maupun
+dari halamannya.
+
+Menimpanya dengan portal lain:
+
 ```bash
---portal https://script.google.com/macros/s/…/exec
+# Linux/macOS
+./install.sh --portal https://portal-anda.example/ajukan
+SCADA_LICENSE_PORTAL_URL=https://portal-anda.example/ajukan ./install.sh
 ```
 
-Kalau vendor mengoperasikan portal pengajuan, isi alamatnya lewat flag itu atau
-`SCADA_LICENSE_PORTAL_URL`. Alamatnya cuma **ditampilkan sebagai tautan** di
-halaman Lisensi supaya pelanggan tahu harus ke mana; tidak ada permintaan
-jaringan dari server maupun dari halamannya. Biarkan kosong di jaringan yang
-terputus dari internet — tautannya tidak akan muncul, dan halaman itu berganti
-menyuruh pelanggan mengirim kodenya lewat jalur apa pun.
+```powershell
+# Windows
+$env:SCADA_LICENSE_PORTAL_URL = 'https://portal-anda.example/ajukan'
+irm .../install.ps1 | iex
+```
+
+Mematikannya — untuk jaringan yang terputus dari internet — pakai kata `off`,
+bukan string kosong: PowerShell dan `cmd.exe` menghapus variabel yang diisi
+string kosong, jadi di sana "kosong" tidak bisa dibedakan dari "tidak diisi",
+dan "tidak diisi" jatuh ke bawaan.
+
+```bash
+./install.sh --no-portal                  # atau: --portal off
+SCADA_LICENSE_PORTAL_URL=off ./install.sh
+```
+
+Tanpa tautan, halaman Lisensi berganti menyuruh pelanggan mengirim kodenya ke
+vendor lewat jalur apa pun.
+
+Pada instalasi yang sudah berjalan, alamatnya bisa diganti tanpa menjalankan
+installer lagi:
+
+```bash
+scada portal                                    # lihat yang sedang dipakai
+scada portal https://portal-anda.example/ajukan # ganti
+scada portal off                                # matikan tautannya
+```
+
+Alamat yang sudah terisi di `.env` **tidak** ditimpa oleh upgrade — baik yang
+diatur lewat `scada portal` maupun yang sengaja dimatikan. Hanya `--portal` /
+`SCADA_LICENSE_PORTAL_URL` yang eksplisit bisa menimpanya.
 
 ## Mengelola
 
@@ -109,6 +150,8 @@ scada doctor              periksa kenapa tidak bisa dipakai
 scada create-admin <email> <sandi>    buat admin pertama
 scada reset-password <email> <sandi>  ganti kata sandi
 scada enroll enr_xxxx     daftarkan edge agent
+scada portal              lihat alamat portal lisensi
+scada portal <url>|off    ganti atau matikan tautan portal
 scada backup              cadangkan database + .env
 scada restore <berkas>    pulihkan dari cadangan
 scada uninstall           hapus kontainer dan volume

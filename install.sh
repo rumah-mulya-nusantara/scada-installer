@@ -17,6 +17,8 @@
 #   --admin-email <email>   email admin
 #   --admin-password <pw>   kata sandi admin (min. 8 karakter)
 #   --tag <versi>           tag image (default: latest)
+#   --portal <url>          alamat portal aktivasi lisensi (ada bawaannya)
+#   --no-portal             jangan tampilkan tautan portal
 #   --auto-update on|off    pembaruan otomatis harian (default: on)
 #   --update-at HH:MM       jam pembaruan otomatis (default: 02:30)
 #   --https                 aktifkan TLS internal Caddy
@@ -27,6 +29,25 @@
 set -euo pipefail
 
 SCADA_VERSION="2.1.2"
+
+# Alamat portal aktivasi lisensi. Bawaan produk, bukan bawaan installer: nilai
+# ini ikut ke setiap OS dan ke setiap instalasi yang di-upgrade, jadi pemasang
+# tidak perlu mengingat env var apa pun. Alamatnya cuma ditampilkan sebagai
+# tautan di halaman Lisensi — server ini tidak pernah menghubunginya.
+# Menimpanya:  --portal <url>   atau  SCADA_LICENSE_PORTAL_URL=<url>
+# Mematikannya: --no-portal      atau  SCADA_LICENSE_PORTAL_URL=off
+SCADA_DEFAULT_PORTAL_URL="https://script.google.com/macros/s/AKfycbzwt6nvIcdsc2X-FjjaIXO7Ecc7bSa3kOPwoXMeU9SlVWl7ToqsIs_7sG9P3wgaVZg/exec"
+
+# `off`, `none`, `-`, dan string kosong sama-sama berarti "tanpa portal". Tiga
+# kata itu diperlukan karena cmd.exe dan PowerShell menghapus variabel yang
+# diisi string kosong, jadi di sana "kosong" tidak bisa dibedakan dari "tidak
+# diisi" — dan "tidak diisi" harus jatuh ke bawaan di atas.
+normalize_portal() {
+    case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+        ''|off|none|no|'-'|false) printf '' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
 
 RED=''; GRN=''; YLW=''; CYN=''; DIM=''; BLD=''; RST=''
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -221,8 +242,12 @@ env_value() {
 }
 
 env_set() {
+    # `&` dan `|` punya arti khusus di bagian pengganti sed; sebuah URL yang
+    # memuatnya akan tertulis rusak tanpa lolos-kan ini.
+    local esc
+    esc="$(printf '%s' "$2" | sed 's/[\\&|]/\\&/g')"
     if grep -q "^$1=" .env 2>/dev/null; then
-        sed -i.bak "s|^$1=.*|$1=$2|" .env && rm -f .env.bak
+        sed -i.bak "s|^$1=.*|$1=$esc|" .env && rm -f .env.bak
     else
         printf '%s=%s\n' "$1" "$2" >> .env
     fi
@@ -591,8 +616,11 @@ dk() { $SCADA_DOCKER "$@"; }
 
 env_value() { sed -n "s/^$1=//p" .env 2>/dev/null | head -1; }
 env_set() {
+    # `&` dan `|` punya arti khusus di bagian pengganti sed; sebuah URL yang
+    # memuatnya akan tertulis rusak tanpa lolos-kan ini.
+    _esc="$(printf '%s' "$2" | sed 's/[\\&|]/\\&/g')"
     if grep -q "^$1=" .env 2>/dev/null; then
-        sed -i.bak "s|^$1=.*|$1=$2|" .env && rm -f .env.bak
+        sed -i.bak "s|^$1=.*|$1=$_esc|" .env && rm -f .env.bak
     else
         printf '%s=%s\n' "$1" "$2" >> .env
     fi
@@ -856,6 +884,29 @@ case "${1:-help}" in
         env_set AGENT_ENROLLMENT_CODE "$code"
         dc up -d --force-recreate agent
         ok "Agent didaftarkan. Pantau: scada logs agent" ;;
+    portal)
+        # Mengganti alamat portal lisensi tanpa menjalankan installer lagi —
+        # satu-satunya cara pada instalasi yang sudah berjalan.
+        case "${2:-show}" in
+            show)
+                p="$(env_value LICENSE_PORTAL_URL)"
+                if [ -n "$p" ]; then printf '%s\n' "$p"
+                else printf 'tanpa portal — halaman Lisensi menyuruh kirim kode ke vendor\n'; fi
+                exit 0 ;;
+            off|none|no|-) new_portal="" ;;
+            *)             new_portal="$2" ;;
+        esac
+        env_set LICENSE_PORTAL_URL "$new_portal"
+        # api dan worker membaca .env lewat env_file, jadi keduanya perlu dibuat
+        # ulang. Kalau stack memang sedang mati, jangan dinyalakan diam-diam.
+        if [ -n "$(dc ps -q api 2>/dev/null)" ]; then
+            dc up -d --force-recreate api worker
+            if [ -n "$new_portal" ]; then ok "Portal lisensi: $new_portal"
+            else ok "Portal lisensi dimatikan."; fi
+        else
+            if [ -n "$new_portal" ]; then ok "Portal lisensi: $new_portal ${DIM}(berlaku setelah: scada start)${RST}"
+            else ok "Portal lisensi dimatikan. ${DIM}(berlaku setelah: scada start)${RST}"; fi
+        fi ;;
     backup)
         f="$(backup_db)"
         ok "Cadangan: $f ${DIM}(.env ikut disalin — wajib untuk membuka kredensial device)${RST}" ;;
@@ -884,6 +935,8 @@ case "${1:-help}" in
         printf '  scada create-admin <email> <sandi>   buat admin pertama\n'
         printf '  scada reset-password <email> <sandi>  ganti kata sandi\n'
         printf '  scada enroll enr_xxxx     daftarkan edge agent\n'
+        printf '  scada portal              lihat alamat portal lisensi\n'
+        printf '  scada portal <url>|off    ganti atau matikan tautan portal\n'
         printf '  scada backup              cadangkan database + .env\n'
         printf '  scada restore <berkas>    pulihkan dari cadangan\n'
         printf '  scada uninstall           hapus kontainer dan volume\n\n' ;;
@@ -987,6 +1040,8 @@ Opsi:
   --admin-email <email>   email admin
   --admin-password <pw>   kata sandi admin (min. 8 karakter)
   --tag <versi>           tag image (default: latest)
+  --portal <url>          alamat portal aktivasi lisensi (ada bawaannya)
+  --no-portal             jangan tampilkan tautan portal
   --auto-update on|off    pembaruan otomatis harian (default: on)
   --update-at HH:MM       jam pembaruan otomatis (default: 02:30)
   --https                 aktifkan TLS internal Caddy
@@ -995,7 +1050,8 @@ Opsi:
   --uninstall             hapus instalasi
 
 Setiap opsi juga bisa lewat environment: SCADA_DIR, SCADA_HOST, SCADA_PORT,
-SCADA_ORG, SCADA_ADMIN_NAME, SCADA_ADMIN_EMAIL, SCADA_ADMIN_PASSWORD, SCADA_TAG.
+SCADA_ORG, SCADA_ADMIN_NAME, SCADA_ADMIN_EMAIL, SCADA_ADMIN_PASSWORD, SCADA_TAG,
+SCADA_LICENSE_PORTAL_URL (isi `off` untuk mematikan tautan portal).
 HELP
 }
 
@@ -1024,7 +1080,13 @@ IMAGE_TAG="${SCADA_TAG:-latest}"
 # Alamat portal aktivasi vendor. Hanya ditampilkan sebagai tautan di halaman
 # Lisensi; server ini tidak pernah menghubunginya. Kosong = tautan tidak muncul,
 # dan halaman itu menyuruh pelanggan mengirim kode ke vendor lewat jalur apa pun.
-LICENSE_PORTAL_URL="${SCADA_LICENSE_PORTAL_URL:-}"
+# Tanpa env var apa pun nilainya jatuh ke SCADA_DEFAULT_PORTAL_URL di atas.
+LICENSE_PORTAL_URL="$(normalize_portal "${SCADA_LICENSE_PORTAL_URL-$SCADA_DEFAULT_PORTAL_URL}")"
+# Dipakai pada upgrade: hanya override yang eksplisit boleh menimpa alamat yang
+# sudah tersimpan di .env. Tanpa penanda ini, alamat yang pelanggan atur sendiri
+# lewat `scada portal` akan terhapus setiap kali installer dijalankan lagi.
+PORTAL_EXPLICIT=0
+[ -z "${SCADA_LICENSE_PORTAL_URL+x}" ] || PORTAL_EXPLICIT=1
 AUTO_UPDATE="${SCADA_AUTO_UPDATE:-}"
 AUTO_UPDATE_AT="${SCADA_UPDATE_AT:-02:30}"
 ASSUME_YES=0
@@ -1050,7 +1112,8 @@ main() {
             --admin-email)    ADMIN_EMAIL="$2";    shift 2 ;;
             --admin-password) ADMIN_PASSWORD="$2"; shift 2 ;;
             --tag)            IMAGE_TAG="$2";      shift 2 ;;
-            --portal)         LICENSE_PORTAL_URL="$2"; shift 2 ;;
+            --portal)         LICENSE_PORTAL_URL="$(normalize_portal "$2")"; PORTAL_EXPLICIT=1; shift 2 ;;
+            --no-portal)      LICENSE_PORTAL_URL=""; PORTAL_EXPLICIT=1; shift ;;
             --auto-update)    AUTO_UPDATE="$2";    shift 2 ;;
             --no-auto-update) AUTO_UPDATE="off";   shift ;;
             --update-at)      AUTO_UPDATE_AT="$2"; shift 2 ;;
@@ -1147,6 +1210,19 @@ main() {
             sed -i.bak "s|^AUTO_UPDATE=.*|AUTO_UPDATE=$AUTO_UPDATE|" .env && rm -f .env.bak
         fi
         AUTO_UPDATE="$(env_value AUTO_UPDATE)"
+
+        # Alamat portal adalah bawaan produk, jadi instalasi lama ikut kena:
+        # baris yang belum ada atau masih kosong diisi sekarang. Alamat yang
+        # sudah terisi tidak disentuh kecuali override eksplisit — pelanggan
+        # boleh punya portalnya sendiri, atau sengaja mematikannya lewat
+        # `scada portal off`, dan itu harus bertahan lewat upgrade.
+        if [ "$PORTAL_EXPLICIT" -eq 1 ]; then
+            env_set LICENSE_PORTAL_URL "$LICENSE_PORTAL_URL"
+        elif ! grep -q '^LICENSE_PORTAL_URL=.' .env; then
+            env_set LICENSE_PORTAL_URL "$LICENSE_PORTAL_URL"
+            [ -z "$LICENSE_PORTAL_URL" ] || ok "Portal lisensi diisi: $LICENSE_PORTAL_URL"
+        fi
+        LICENSE_PORTAL_URL="$(env_value LICENSE_PORTAL_URL)"
     fi
 
     # Adanya .env tidak membuktikan instalasi selesai: instalasi yang mati di
