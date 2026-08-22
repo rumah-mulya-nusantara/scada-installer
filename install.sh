@@ -560,6 +560,7 @@ AGENT_ENROLLMENT_CODE=
 AGENT_LOG_LEVEL=INFO
 
 LICENSE_FILE=/srv/license/license.key
+LICENSE_PORTAL_URL=$LICENSE_PORTAL_URL
 IMAGE_TAG=$IMAGE_TAG
 
 # Pembaruan otomatis harian. Matikan di instalasi air-gapped: scada autoupdate off
@@ -1020,6 +1021,10 @@ ADMIN_NAME="${SCADA_ADMIN_NAME:-Administrator}"
 ADMIN_EMAIL="${SCADA_ADMIN_EMAIL:-}"
 ADMIN_PASSWORD="${SCADA_ADMIN_PASSWORD:-}"
 IMAGE_TAG="${SCADA_TAG:-latest}"
+# Alamat portal aktivasi vendor. Hanya ditampilkan sebagai tautan di halaman
+# Lisensi; server ini tidak pernah menghubunginya. Kosong = tautan tidak muncul,
+# dan halaman itu menyuruh pelanggan mengirim kode ke vendor lewat jalur apa pun.
+LICENSE_PORTAL_URL="${SCADA_LICENSE_PORTAL_URL:-}"
 AUTO_UPDATE="${SCADA_AUTO_UPDATE:-}"
 AUTO_UPDATE_AT="${SCADA_UPDATE_AT:-02:30}"
 ASSUME_YES=0
@@ -1045,6 +1050,7 @@ main() {
             --admin-email)    ADMIN_EMAIL="$2";    shift 2 ;;
             --admin-password) ADMIN_PASSWORD="$2"; shift 2 ;;
             --tag)            IMAGE_TAG="$2";      shift 2 ;;
+            --portal)         LICENSE_PORTAL_URL="$2"; shift 2 ;;
             --auto-update)    AUTO_UPDATE="$2";    shift 2 ;;
             --no-auto-update) AUTO_UPDATE="off";   shift ;;
             --update-at)      AUTO_UPDATE_AT="$2"; shift 2 ;;
@@ -1292,6 +1298,18 @@ main() {
     if [ "${AUTO_UPDATE:-off}" = "on" ]; then
         printf '     Pembaruan  otomatis tiap malam pukul %s  %s(scada autoupdate off untuk mematikan)%s\n' \
             "$AUTO_UPDATE_AT" "$DIM" "$RST"
+    fi
+    printf '\n'
+    # Tanpa baris ini pemasang tidak pernah tahu ada hitungan mundur yang sudah
+    # berjalan; yang ia temukan nanti hanya penolakan 402 saat menambah device.
+    printf '     %sLisensi   %sMode DEMO, hitungannya sudah mulai: 2 device, 100 tag, 2 user.%s\n' \
+        "$BLD" "$DIM" "$RST"
+    if [ -n "$LICENSE_PORTAL_URL" ]; then
+        printf '               %sAktifkan: menu Lisensi → Salin kode → ajukan di%s\n' "$DIM" "$RST"
+        printf '               %s%s%s\n' "$BLD" "$LICENSE_PORTAL_URL" "$RST"
+    else
+        printf '               %sAktifkan: menu Lisensi → Salin kode → kirim ke vendor.%s\n' "$DIM" "$RST"
+        printf '               %sServer ini tidak menghubungi siapa pun.%s\n' "$DIM" "$RST"
     fi
     printf '\n'
     if [ "$AGENT_PROVISIONED" -eq 1 ]; then

@@ -48,8 +48,31 @@ irm .../install.ps1 | iex
 
 `iex` tidak bisa menerima parameter, jadi di Windows semua opsi lewat environment:
 `SCADA_DIR`, `SCADA_HOST`, `SCADA_PORT`, `SCADA_ORG`, `SCADA_ADMIN_NAME`, `SCADA_ADMIN_EMAIL`,
-`SCADA_ADMIN_PASSWORD`, `SCADA_TAG`, `SCADA_AUTO_UPDATE`, `SCADA_UPDATE_AT`, `SCADA_YES`. Di Linux/macOS opsi yang sama tersedia sebagai
+`SCADA_ADMIN_PASSWORD`, `SCADA_TAG`, `SCADA_AUTO_UPDATE`, `SCADA_UPDATE_AT`,
+`SCADA_LICENSE_PORTAL_URL`, `SCADA_YES`. Di Linux/macOS opsi yang sama tersedia sebagai
 flag (`install.sh --help`) maupun environment.
+
+## Lisensi
+
+Pemasangan baru berjalan dalam **mode demo**: 2 device, 100 tag, 2 user, dan
+hitungannya mulai saat itu juga. Untuk mengaktifkannya, pelanggan membuka menu
+**Lisensi** di aplikasi, menyalin kode aktivasi, lalu menyerahkannya ke vendor.
+Balasannya berupa satu berkas lisensi yang ditempel kembali di halaman itu.
+
+Kode aktivasi hanya memuat sidik pemasangan — bukan data proses, bukan
+kredensial. **Server tidak pernah menghubungi siapa pun**, termasuk saat
+aktivasi; pelanggan sendiri yang menyerahkan kodenya.
+
+```bash
+--portal https://script.google.com/macros/s/…/exec
+```
+
+Kalau vendor mengoperasikan portal pengajuan, isi alamatnya lewat flag itu atau
+`SCADA_LICENSE_PORTAL_URL`. Alamatnya cuma **ditampilkan sebagai tautan** di
+halaman Lisensi supaya pelanggan tahu harus ke mana; tidak ada permintaan
+jaringan dari server maupun dari halamannya. Biarkan kosong di jaringan yang
+terputus dari internet — tautannya tidak akan muncul, dan halaman itu berganti
+menyuruh pelanggan mengirim kodenya lewat jalur apa pun.
 
 ## Mengelola
 

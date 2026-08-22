@@ -22,6 +22,9 @@ param(
     [string]$AdminEmail    = $env:SCADA_ADMIN_EMAIL,
     [string]$AdminPassword = $env:SCADA_ADMIN_PASSWORD,
     [string]$ImageTag      = $env:SCADA_TAG,
+    # Alamat portal aktivasi vendor. Hanya ditampilkan sebagai tautan di halaman
+    # Lisensi; server ini tidak pernah menghubunginya. Kosong = tautan tidak muncul.
+    [string]$LicensePortalUrl = $env:SCADA_LICENSE_PORTAL_URL,
     [string]$AutoUpdate    = $env:SCADA_AUTO_UPDATE,
     [string]$UpdateAt      = $env:SCADA_UPDATE_AT,
     [switch]$Https,
@@ -952,6 +955,7 @@ AGENT_ENROLLMENT_CODE=
 AGENT_LOG_LEVEL=INFO
 
 LICENSE_FILE=/srv/license/license.key
+LICENSE_PORTAL_URL=$LicensePortalUrl
 IMAGE_TAG=$ImageTag
 
 # Pembaruan otomatis harian. Matikan di instalasi air-gapped: scada autoupdate off
@@ -1080,6 +1084,17 @@ if ($AdminEmail) { Write-Host "     Login      $AdminEmail" }
 Write-Host "     Kelola     scada  (start, stop, logs, update, backup)"
 if ($AutoUpdate -eq 'on') {
     Write-Host "     Pembaruan  otomatis tiap malam pukul $UpdateAt  (scada autoupdate off untuk mematikan)"
+}
+Write-Host ''
+# Tanpa baris ini pemasang tidak pernah tahu ada hitungan mundur yang sudah
+# berjalan; yang ia temukan nanti hanya penolakan 402 saat menambah device.
+Write-Host '     Lisensi   Mode DEMO, hitungannya sudah mulai: 2 device, 100 tag, 2 user.'
+if ($LicensePortalUrl) {
+    Write-Host '               Aktifkan: menu Lisensi → Salin kode → ajukan di' -ForegroundColor DarkGray
+    Write-Host "               $LicensePortalUrl"
+} else {
+    Write-Host '               Aktifkan: menu Lisensi → Salin kode → kirim ke vendor.' -ForegroundColor DarkGray
+    Write-Host '               Server ini tidak menghubungi siapa pun.' -ForegroundColor DarkGray
 }
 Write-Host ''
 if ($AgentProvisioned) {
