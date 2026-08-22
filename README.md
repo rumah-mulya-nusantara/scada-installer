@@ -289,5 +289,22 @@ tools/embed.py check    # dipakai CI; gagal bila menyimpang
 Hanya Docker — dan itu pun dipasang otomatis. Gunakan `--no-docker-install` (atau
 `-NoDockerInstall`) bila mesin tujuan mengaturnya sendiri.
 
+### Arsitektur
+
+Image diterbitkan untuk **`linux/amd64` dan `linux/arm64`**, jadi distribusinya bebas selama
+64-bit dan ada Docker: Debian, Ubuntu, Armbian arm64, Raspberry Pi OS 64-bit, RHEL/Rocky, Fedora,
+openSUSE, Arch, macOS, dan Windows 10/11 + Docker Desktop.
+
+OS **32-bit** (armv7/armhf/i386) tidak didukung: `pydantic-core`, `orjson`, dan `cryptography`
+tidak menyediakan wheel 32-bit. Installer memeriksanya di langkah 1/7 — sebelum image ditarik —
+dan berhenti dengan pesan "pasang OS 64-bit", karena `get.docker.com` memasang Docker dengan
+senang hati di papan 32-bit dan kegagalannya baru muncul jauh di belakang sebagai
+`no matching manifest`. Yang diperiksa adalah arsitektur daemon Docker
+(`docker version --format '{{.Server.Arch}}'`), bukan `uname -m`: banyak papan ARM memakai
+userland 32-bit di atas kernel 64-bit.
+
+Di mesin ber-RAM di bawah 4 GB installer menulis `API_WORKERS=2` ke `.env` (bawaan 4) supaya
+Postgres, Redis, dan Next.js tetap kebagian memori; di bawah 2 GB ia juga menyarankan swap.
+
 Instalasi on-premise tidak melakukan panggilan keluar apa pun setelah image tertarik; alamat
 `raw.githubusercontent.com` dan `ghcr.io` hanya dibutuhkan saat memasang dan saat `scada update`.

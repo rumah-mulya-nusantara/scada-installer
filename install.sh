@@ -129,6 +129,55 @@ rand_urlsafe_b64() {
 
 # ── Lingkungan ───────────────────────────────────────────────────────────────
 OS=""; SUDO=""
+API_WORKERS=4
+
+# Arsitektur yang punya image di ghcr.io. Yang menentukan **arsitektur daemon
+# Docker**, bukan `uname -m`: papan ARM sering menjalankan userland 32-bit di atas
+# kernel 64-bit — `uname -m` menjawab aarch64 sementara containernya armv7, dan
+# image untuk itu tidak diterbitkan. Diperiksa sebelum apa pun ditarik, karena
+# get.docker.com memasang Docker dengan senang hati di papan 32-bit dan
+# kegagalannya baru muncul sebagai "no matching manifest" jauh di belakang.
+require_arch() {
+    local arch
+    arch="$($DOCKER version --format '{{.Server.Arch}}' 2>/dev/null || true)"
+    case "$arch" in
+        amd64|arm64)
+            ok "Arsitektur $arch didukung" ;;
+        arm|armv7l|armhf|arm/v7|arm/v6|386)
+            die "Docker di mesin ini menjalankan container 32-bit ($arch). SCADA hanya diterbitkan untuk 64-bit (amd64 dan arm64) — pustaka Python-nya tidak punya wheel 32-bit dan papannya kehabisan memori saat mengompilasinya. Pasang OS 64-bit: Armbian varian arm64, Raspberry Pi OS 64-bit, atau Debian/Ubuntu arm64." ;;
+        "")
+            die "Tidak bisa membaca arsitektur daemon Docker." ;;
+        *)
+            die "Arsitektur $arch belum diterbitkan (tersedia: amd64, arm64). Hubungi vendor bila membutuhkannya." ;;
+    esac
+}
+
+detect_ram_mb() {
+    if [ -r /proc/meminfo ]; then
+        awk '/^MemTotal:/ {printf "%d", $2 / 1024; exit}' /proc/meminfo
+    elif have sysctl; then
+        sysctl -n hw.memsize 2>/dev/null | awk '{printf "%d", $1 / 1048576}'
+    fi
+}
+
+# Empat worker uvicorn memakan ±600 MB, dan papan ARM 2 GB juga harus menampung
+# Postgres, Redis, serta Next.js di mesin yang sama.
+tune_workers() {
+    local ram
+    ram="$(detect_ram_mb || true)"
+    # Keluaran non-angka (awk tidak ada, sysctl gagal) tidak boleh membuat `[`
+    # mengeluh; pemasangan tetap berjalan dengan bawaan 4 worker.
+    case "$ram" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    if [ "$ram" -lt 1700 ]; then
+        API_WORKERS=2
+        warn "RAM $ram MB — di bawah 2 GB yang praktis. Tambahkan swap (mis. 2 GB); tanpa itu migrasi bisa dimatikan OOM killer."
+    elif [ "$ram" -lt 4000 ]; then
+        API_WORKERS=2
+        info "RAM $ram MB — API dijalankan dengan 2 worker agar hemat memori"
+    fi
+}
 
 detect_os() {
     case "$(uname -s)" in
@@ -345,6 +394,8 @@ ensure_docker() {
     fi
 
     ok "Docker $($DOCKER version --format '{{.Server.Version}}' 2>/dev/null || echo '?') siap"
+    require_arch
+    tune_workers
 }
 
 dc() { $COMPOSE -f docker-compose.prod.yml "$@"; }
@@ -560,6 +611,10 @@ COMPOSE_PROJECT_NAME=scada-onprem
 DEPLOYMENT_MODE=onprem
 ENVIRONMENT=production
 LOG_LEVEL=INFO
+
+# Worker uvicorn untuk proses API. Diturunkan otomatis menjadi 2 di mesin
+# ber-RAM kecil (papan ARM, VM 2 GB); naikkan bila servernya lebih besar.
+API_WORKERS=$API_WORKERS
 
 SITE_ADDRESS=$SITE_ADDRESS
 PUBLIC_URL=$PUBLIC_URL

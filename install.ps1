@@ -36,6 +36,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ScadaVersion = '2.1.2'
+# Worker uvicorn untuk proses API; diturunkan oleh Set-ApiWorkers di mesin
+# ber-RAM kecil.
+$ApiWorkers = 4
 
 # Alamat portal aktivasi lisensi. Bawaan produk, bukan bawaan installer: nilai
 # ini ikut ke setiap OS dan ke setiap instalasi yang di-upgrade, jadi pemasang
@@ -152,6 +155,31 @@ function Test-DockerReady {
     return ($LASTEXITCODE -eq 0)
 }
 
+# Arsitektur container yang dijalankan Docker Desktop, bukan arsitektur Windows:
+# di Windows on ARM daemonnya menjalankan arm64. Image diterbitkan untuk amd64 dan
+# arm64 saja.
+function Assert-DockerArch {
+    $arch = (& docker version --format '{{.Server.Arch}}')
+    if ($arch -notin @('amd64', 'arm64')) {
+        Die "Arsitektur container '$arch' belum diterbitkan (tersedia: amd64, arm64)."
+    }
+    Write-Ok "Arsitektur $arch didukung"
+}
+
+# Empat worker uvicorn memakan sekitar 600 MB, dan mesin kecil juga harus
+# menampung Postgres, Redis, serta Next.js.
+function Set-ApiWorkers {
+    try {
+        $ramMb = [int]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)
+    } catch {
+        return   # tidak bisa membaca RAM bukan alasan membatalkan pemasangan
+    }
+    if ($ramMb -lt 4000) {
+        $script:ApiWorkers = 2
+        Write-Info "RAM $ramMb MB - API dijalankan dengan 2 worker agar hemat memori"
+    }
+}
+
 function Start-DockerDesktop {
     $candidates = @(
         (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'),
@@ -196,6 +224,8 @@ function Initialize-Docker {
     Write-Step '1/7  Docker'
     if (Test-DockerReady) {
         Write-Ok "Docker $(& docker version --format '{{.Server.Version}}') siap"
+        Assert-DockerArch
+        Set-ApiWorkers
         return
     }
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -212,6 +242,8 @@ function Initialize-Docker {
     & docker compose version 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { Die "Plugin 'docker compose' v2 tidak tersedia. Perbarui Docker Desktop." }
     Write-Ok "Docker $(& docker version --format '{{.Server.Version}}') siap"
+    Assert-DockerArch
+    Set-ApiWorkers
 }
 
 function Invoke-Compose {
@@ -1004,6 +1036,10 @@ COMPOSE_PROJECT_NAME=scada-onprem
 DEPLOYMENT_MODE=onprem
 ENVIRONMENT=production
 LOG_LEVEL=INFO
+
+# Worker uvicorn untuk proses API. Diturunkan otomatis menjadi 2 di mesin
+# ber-RAM kecil; naikkan bila servernya lebih besar.
+API_WORKERS=$ApiWorkers
 
 SITE_ADDRESS=$SiteAddress
 PUBLIC_URL=$PublicUrl
