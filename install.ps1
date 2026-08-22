@@ -43,7 +43,7 @@ $ScadaVersion = '2.1.2'
 # tautan di halaman Lisensi — server ini tidak pernah menghubunginya.
 # Menimpanya:   $env:SCADA_LICENSE_PORTAL_URL = '<url>'
 # Mematikannya: $env:SCADA_LICENSE_PORTAL_URL = 'off'
-$ScadaDefaultPortalUrl = 'https://script.google.com/macros/s/AKfycbzwt6nvIcdsc2X-FjjaIXO7Ecc7bSa3kOPwoXMeU9SlVWl7ToqsIs_7sG9P3wgaVZg/exec'
+$ScadaDefaultPortalUrl = 'https://script.google.com/macros/s/AKfycbzu97PwuFyUHex8xy7_QIkfxXsWkNpIS7WAIqFU0uKjWkmN5_HZjOA0kAmHZD0j9trH/exec'
 
 # PowerShell dan cmd.exe menghapus variabel yang diisi string kosong, jadi di
 # sana "kosong" tidak bisa dibedakan dari "tidak diisi" — dan "tidak diisi"

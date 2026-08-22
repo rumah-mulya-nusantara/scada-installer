@@ -36,7 +36,7 @@ SCADA_VERSION="2.1.2"
 # tautan di halaman Lisensi — server ini tidak pernah menghubunginya.
 # Menimpanya:  --portal <url>   atau  SCADA_LICENSE_PORTAL_URL=<url>
 # Mematikannya: --no-portal      atau  SCADA_LICENSE_PORTAL_URL=off
-SCADA_DEFAULT_PORTAL_URL="https://script.google.com/macros/s/AKfycbzwt6nvIcdsc2X-FjjaIXO7Ecc7bSa3kOPwoXMeU9SlVWl7ToqsIs_7sG9P3wgaVZg/exec"
+SCADA_DEFAULT_PORTAL_URL="https://script.google.com/macros/s/AKfycbzu97PwuFyUHex8xy7_QIkfxXsWkNpIS7WAIqFU0uKjWkmN5_HZjOA0kAmHZD0j9trH/exec"
 
 # `off`, `none`, `-`, dan string kosong sama-sama berarti "tanpa portal". Tiga
 # kata itu diperlukan karena cmd.exe dan PowerShell menghapus variabel yang
