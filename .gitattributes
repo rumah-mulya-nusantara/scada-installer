@@ -1,0 +1,14 @@
+# Berkas batch Windows WAJIB CRLF, dan `-text` bukan `text eol=crlf`.
+#
+# `text eol=crlf` menyimpan LF di dalam repo dan baru mengubahnya jadi CRLF saat
+# checkout — sedangkan pelanggan mengunduh lewat raw.githubusercontent.com, yang
+# menyajikan blob apa adanya. Mereka akan menerima LF. `-text` mematikan seluruh
+# konversi, jadi byte yang di-commit itulah yang diunduh.
+*.cmd -text
+*.bat -text
+
+# Sebaliknya, skrip shell dan PowerShell harus LF. install.ps1 dijalankan lewat
+# `irm | iex`, dan install.sh lewat `curl | bash`; CR yang nyasar membuat bash
+# gagal dengan "bad interpreter".
+*.sh  text eol=lf
+*.ps1 text eol=lf

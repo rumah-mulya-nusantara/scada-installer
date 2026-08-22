@@ -11,11 +11,32 @@ Satu perintah, satu berkas, tanpa perlu source code di mesin tujuan.
 curl -fsSL https://raw.githubusercontent.com/rumah-mulya-nusantara/scada-installer/main/install.sh | bash
 ```
 
+**Windows — klik dua kali**
+
+Unduh [`install.cmd`](https://raw.githubusercontent.com/rumah-mulya-nusantara/scada-installer/main/install.cmd)
+(klik kanan → *Save link as…*), lalu klik dua kali. Itu saja.
+
 **Windows (PowerShell)**
 
 ```powershell
 irm https://raw.githubusercontent.com/rumah-mulya-nusantara/scada-installer/main/install.ps1 | iex
 ```
+
+`install.cmd` hanya pembungkus tipis di atas perintah itu — isinya sama, bedanya
+pelanggan tidak perlu membuka PowerShell atau menempel perintah.
+
+Sengaja **bukan `.exe`**. PS2EXE menanamkan skrip PowerShell di dalam executable
+.NET, teknik yang sama dengan yang dipakai malware, jadi hasilnya rutin ditandai
+Windows Defender; dan setiap `.exe` yang diunduh tanpa sertifikat code-signing
+memunculkan layar *"Windows protected your PC"*. Berkas `.cmd` tidak memicu
+keduanya. Kalau nanti sertifikat EV code-signing dibeli, barulah `.exe` masuk
+akal — bungkus dengan PS2EXE, tandatangani dengan `signtool`, lalu uji unduh
+dari mesin bersih untuk memastikan SmartScreen benar-benar diam.
+
+Untuk memasang banyak mesin sekaligus, pakai
+[`install-otomatis.cmd`](https://raw.githubusercontent.com/rumah-mulya-nusantara/scada-installer/main/install-otomatis.cmd):
+buka dengan Notepad, isi email dan kata sandi admin di bagian atas, lalu jalankan.
+Berkas itu memuat kata sandi dalam teks biasa — hapus setelah selesai.
 
 Installer akan, dalam satu jalan:
 
@@ -208,6 +229,8 @@ menyala dengan database kosong.
 | `infra/caddy/Caddyfile` | konfigurasi reverse proxy, **sumber kanonik** |
 | `tools/reset_password.py` | dipakai `scada reset-password`, **sumber kanonik** |
 | `tools/embed.py` | menanam ulang ketiga berkas kanonik itu ke dalam kedua installer |
+| `install.cmd` | pembungkus klik-dua-kali untuk Windows; memanggil `install.ps1` |
+| `install-otomatis.cmd` | sama, tanpa tanya-jawab, untuk pemasangan massal |
 | `get.sh` / `get.ps1` | alias lama, meneruskan ke `install.sh` / `install.ps1` |
 
 Kedua installer memuat salinan `docker-compose.prod.yml`, `Caddyfile`, dan `reset_password.py`
